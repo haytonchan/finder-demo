@@ -38,11 +38,17 @@ const shortestAngle = (a, b) => {
 // bearing (rotation about Y) from puck -> point, matching LED layout x=cos a, z=-sin a
 const bearingTo = (x, z) => Math.atan2(-(z - PUCK_POS[2]), x - PUCK_POS[0])
 
-// a fresh roaming target for the laptop: varied direction AND distance, kept in frame
+// a fresh roaming target for the laptop: any direction all the way around the
+// puck (left, right, front, back), at varied distance, kept in frame and clear
+// of the puck itself
 const pickTarget = () => {
-  const x = -(1.4 + Math.random() * 5.1)
-  const z = (Math.random() - 0.5) * 6.4
-  return [clamp(x, -6.6, -1.2), 0, clamp(z, -3.3, 3.3)]
+  for (let i = 0; i < 40; i++) {
+    const x = -6.4 + Math.random() * 12.0 // -6.4 .. 5.6
+    const z = (Math.random() - 0.5) * 6.8 // -3.4 .. 3.4
+    // keep a clear gap from the puck so they never overlap
+    if (Math.hypot(x - PUCK_POS[0], z - PUCK_POS[2]) >= 2.1) return [x, 0, z]
+  }
+  return [-3, 0, 0]
 }
 
 /* ---------------- UPenn sticker decal (canvas texture, self-contained) --------------- */

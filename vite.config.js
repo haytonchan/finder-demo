@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 
 // Treat .js files in src/ as JSX so the component can live in web.js
 export default defineConfig({
+  base: '/finder-demo/',
   plugins: [
     {
       name: 'treat-js-as-jsx',
