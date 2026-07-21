@@ -1,0 +1,12 @@
+Drop your exact Penn crest artwork here as:
+
+    penn-crest.png
+
+Recommended: a SQUARE PNG (e.g. 1024x1024), crest centered, with a
+transparent or white background. It will automatically appear on every
+sticker in the demo (laptop lid + exploded-view shell). Until this file
+exists, the demo uses a hand-drawn crest as a fallback.
+
+Note: the University of Pennsylvania coat of arms is a trademark of the
+University. Use your own licensed copy; fine for an internal concept
+mockup, but clear usage rights before anything public or commercial.
