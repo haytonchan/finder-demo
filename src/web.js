@@ -558,10 +558,14 @@ const LAYERS = [
   { key: 'shell', assembledY: 0.35, explodedY: 3.85 },
 ]
 
-function ExplodedSticker() {
+function ExplodedSticker({ closing, onClosed }) {
   const layerRefs = useRef({})
   const labelRefs = useRef({})
-  const start = useRef(null)
+  const eRef = useRef(0) // 0 = sealed shut, 1 = fully exploded
+  const tRef = useRef(0) // phase timer
+  const startE = useRef(0) // e value at the moment closing began
+  const phaseRef = useRef('wait') // 'wait' | 'open' | 'open-hold' | 'closing' | 'done'
+  const closedCalled = useRef(false)
   const pennTex = useStickerTexture()
 
   // detail textures for the internals, all drawn in-code (no external assets)
@@ -657,16 +661,57 @@ function ExplodedSticker() {
     return { pcb, battery, uwb: chip('UWB', 'DW-3110'), ble: chip('BLE', 'NRF-528') }
   }, [])
 
-  useFrame(({ clock }) => {
-    if (start.current == null) start.current = clock.elapsedTime
-    const cycle = (clock.elapsedTime - start.current + 0.6) % 7
-    // 0-1.2 explode · hold · 4.4-5.6 re-assemble · hold
-    let e
-    if (cycle < 1.2) e = smooth(cycle / 1.2)
-    else if (cycle < 4.4) e = 1
-    else if (cycle < 5.6) e = 1 - smooth((cycle - 4.4) / 1.2)
-    else e = 0
+  useFrame((_, delta) => {
+    const WAIT = 1.0 // sit closed for a beat before opening
+    const OPEN_DUR = 3.0 // slow, deliberate reveal
+    const CLOSE_DUR = 1.0
 
+    // Back was pressed → begin closing from wherever we are
+    if (closing && phaseRef.current !== 'closing' && phaseRef.current !== 'done') {
+      if (eRef.current < 0.02) {
+        phaseRef.current = 'done'
+        if (!closedCalled.current) {
+          closedCalled.current = true
+          onClosed && onClosed()
+        }
+      } else {
+        phaseRef.current = 'closing'
+        tRef.current = 0
+        startE.current = eRef.current
+      }
+    }
+
+    const p = phaseRef.current
+    if (p === 'wait') {
+      tRef.current += delta
+      eRef.current = 0
+      if (tRef.current >= WAIT) {
+        phaseRef.current = 'open'
+        tRef.current = 0
+      }
+    } else if (p === 'open') {
+      tRef.current += delta
+      eRef.current = smooth(Math.min(tRef.current / OPEN_DUR, 1))
+      if (tRef.current >= OPEN_DUR) phaseRef.current = 'open-hold'
+    } else if (p === 'open-hold') {
+      eRef.current = 1
+    } else if (p === 'closing') {
+      tRef.current += delta
+      const k = Math.min(tRef.current / CLOSE_DUR, 1)
+      eRef.current = startE.current * (1 - smooth(k))
+      if (k >= 1) {
+        eRef.current = 0
+        phaseRef.current = 'done'
+        if (!closedCalled.current) {
+          closedCalled.current = true
+          onClosed && onClosed()
+        }
+      }
+    } else {
+      eRef.current = 0
+    }
+
+    const e = eRef.current
     LAYERS.forEach((L) => {
       const g = layerRefs.current[L.key]
       if (g) g.position.y = L.assembledY + (L.explodedY - L.assembledY) * e
@@ -891,7 +936,7 @@ function CameraRig({ mode }) {
   return null
 }
 
-function Scene({ mode, laptopTarget, stickerWorldPos, hintRef }) {
+function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, closing, onExplodedClosed }) {
   const inside = mode === 'inside'
   return (
     <>
@@ -914,7 +959,7 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef }) {
       <CameraRig mode={mode} />
 
       {inside ? (
-        <ExplodedSticker />
+        <ExplodedSticker closing={closing} onClosed={onExplodedClosed} />
       ) : (
         <>
           <LaptopWithSticker mode={mode} targetRef={laptopTarget} worldPosRef={stickerWorldPos} />
@@ -955,6 +1000,7 @@ const buttonStyle = (primary) => ({
 
 export default function FinderDemo() {
   const [mode, setMode] = useState('idle') // 'idle' | 'seek' | 'inside'
+  const [closing, setClosing] = useState(false) // exploded view is sealing before going home
   const laptopTarget = useRef([...LAPTOP_HOME])
   const stickerWorldPos = useRef(new THREE.Vector3(...LAPTOP_HOME))
   const hintRef = useRef()
@@ -975,6 +1021,18 @@ export default function FinderDemo() {
     setMode('idle')
   }
 
+  const enterInside = () => {
+    setClosing(false)
+    setMode('inside')
+  }
+
+  // Back from the exploded view: seal the sticker first, then return home
+  const beginClose = () => setClosing(true)
+  const finishClose = () => {
+    setClosing(false)
+    goIdle()
+  }
+
   const subtitle =
     mode === 'inside'
       ? 'Inside the sticker — magnified view, ~3 mm thin in real life'
@@ -983,7 +1041,14 @@ export default function FinderDemo() {
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100vh' }}>
       <Canvas shadows dpr={[1, 2]} camera={{ position: [0, 9, 12], fov: 42 }}>
-        <Scene mode={mode} laptopTarget={laptopTarget} stickerWorldPos={stickerWorldPos} hintRef={hintRef} />
+        <Scene
+          mode={mode}
+          laptopTarget={laptopTarget}
+          stickerWorldPos={stickerWorldPos}
+          hintRef={hintRef}
+          closing={closing}
+          onExplodedClosed={finishClose}
+        />
       </Canvas>
 
       <div
@@ -1007,7 +1072,7 @@ export default function FinderDemo() {
             <button onClick={() => setMode('seek')} style={buttonStyle(true)}>
               Show how it works
             </button>
-            <button onClick={() => setMode('inside')} style={buttonStyle(false)}>
+            <button onClick={enterInside} style={buttonStyle(false)}>
               What’s inside the sticker
             </button>
           </>
@@ -1018,8 +1083,12 @@ export default function FinderDemo() {
           </button>
         )}
         {mode === 'inside' && (
-          <button onClick={goIdle} style={buttonStyle(false)}>
-            Back
+          <button
+            onClick={beginClose}
+            disabled={closing}
+            style={{ ...buttonStyle(false), opacity: closing ? 0.6 : 1, cursor: closing ? 'default' : 'pointer' }}
+          >
+            {closing ? 'Closing…' : 'Back'}
           </button>
         )}
       </div>
