@@ -18,9 +18,24 @@ import { OrbitControls, ContactShadows, RoundedBox, Html } from '@react-three/dr
 import * as THREE from 'three'
 
 const LED_COUNT = 24
-const PUCK_POS = [2.9, 0.24, 0]
-const LAPTOP_HOME = [-2.9, 0, 0]
+const PUCK_POS = [4.0, 1.6, -2.9] // resting on the desk
 const UNITS_TO_FEET = 3.2 // scene units -> "feet" for the distance estimate
+
+// Named resting spots the laptop wanders between, each sitting on a real surface.
+// index 0 is "home" (where it rests while idle).
+const SPOTS = [
+  { name: 'On the bed', pos: [-4.6, 1.05, -2.4] },
+  { name: 'On the desk', pos: [2.4, 1.42, -4.0] },
+  { name: 'On the nightstand', pos: [-1.8, 1.13, -3.9] },
+  { name: 'On the rug', pos: [0.3, 0.04, 0.9] },
+  { name: 'At the foot of the bed', pos: [-3.0, 1.05, -0.6] },
+]
+const LAPTOP_HOME = SPOTS[0].pos
+const nextSpotIndex = (prev) => {
+  let i = prev
+  while (i === prev) i = Math.floor(Math.random() * SPOTS.length)
+  return i
+}
 
 const IDLE_COLOR = new THREE.Color('#38e0c8') // teal sweep while idle
 const SEEK_COLOR = new THREE.Color('#3fa9ff') // blue lock when seeking
@@ -37,19 +52,6 @@ const shortestAngle = (a, b) => {
 
 // bearing (rotation about Y) from puck -> point, matching LED layout x=cos a, z=-sin a
 const bearingTo = (x, z) => Math.atan2(-(z - PUCK_POS[2]), x - PUCK_POS[0])
-
-// a fresh roaming target for the laptop: any direction all the way around the
-// puck (left, right, front, back), at varied distance, kept in frame and clear
-// of the puck itself
-const pickTarget = () => {
-  for (let i = 0; i < 40; i++) {
-    const x = -6.4 + Math.random() * 12.0 // -6.4 .. 5.6
-    const z = (Math.random() - 0.5) * 6.8 // -3.4 .. 3.4
-    // keep a clear gap from the puck so they never overlap
-    if (Math.hypot(x - PUCK_POS[0], z - PUCK_POS[2]) >= 2.1) return [x, 0, z]
-  }
-  return [-3, 0, 0]
-}
 
 /* ---------------- UPenn sticker decal (canvas texture, self-contained) --------------- */
 
@@ -289,22 +291,25 @@ function Label({ position, children }) {
 
 function LaptopWithSticker({ mode, targetRef, worldPosRef }) {
   const group = useRef()
+  const baseY = useRef(LAPTOP_HOME[1]) // resting height, lerped between surfaces
   const pennTex = useStickerTexture()
 
   useFrame((_, delta) => {
     const g = group.current
     if (!g) return
     const t = targetRef.current
-    const k = 1 - Math.pow(0.0022, delta) // framerate-independent smoothing
+    const k = 1 - Math.pow(0.0025, delta) // framerate-independent smoothing
     g.position.x += (t[0] - g.position.x) * k
     g.position.z += (t[2] - g.position.z) * k
+    baseY.current += (t[1] - baseY.current) * k
     const dist = Math.hypot(t[0] - g.position.x, t[2] - g.position.z)
-    g.position.y = Math.min(dist * 0.18, 0.45) // little hop while travelling
+    const hop = Math.min(dist * 0.16, 0.7) // arc up while travelling between spots
+    g.position.y = baseY.current + hop
     worldPosRef.current.set(g.position.x, g.position.y, g.position.z)
   })
 
   return (
-    <group ref={group} position={LAPTOP_HOME}>
+    <group ref={group} position={LAPTOP_HOME} scale={0.72}>
       {/* keyboard deck, receding away from camera */}
       <RoundedBox args={[2.2, 0.1, 1.5]} radius={0.04} smoothness={4} position={[0, 0.06, -0.72]} castShadow receiveShadow>
         <meshStandardMaterial color="#c8ccd2" roughness={0.35} metalness={0.75} />
@@ -358,7 +363,7 @@ function PingRing() {
 
 /* ---------------- Finder puck: LED ring + on-device screen ---------------- */
 
-function FinderPuck({ mode, stickerWorldPos, hintRef }) {
+function FinderPuck({ mode, stickerWorldPos, hintRef, spotNameRef }) {
   const ledRefs = useRef([])
   const sweep = useRef(0)
 
@@ -407,9 +412,8 @@ function FinderPuck({ mode, stickerWorldPos, hintRef }) {
     const feet = Math.round(Math.hypot(sx - PUCK_POS[0], sz - PUCK_POS[2]) * UNITS_TO_FEET)
     const near = feet <= 3
     if (hintRef?.current) {
-      hintRef.current.textContent = near
-        ? 'You’re right on top of it'
-        : `Item this way · ≈ ${feet} ft away`
+      const where = spotNameRef?.current || 'This way'
+      hintRef.current.textContent = near ? 'Right here' : `${where} · ≈ ${feet} ft away`
     }
 
     /* ---- draw the on-device screen (viewed from above: +X right, +Z down) ---- */
@@ -465,7 +469,11 @@ function FinderPuck({ mode, stickerWorldPos, hintRef }) {
   })
 
   return (
-    <group position={PUCK_POS}>
+    <group position={PUCK_POS} scale={0.8}>
+      {/* signature glow: the ring pools coloured light onto the desk while seeking */}
+      {mode === 'seek' && (
+        <pointLight position={[0, 0.7, 0]} color="#3fa9ff" intensity={5} distance={4} decay={2} />
+      )}
       {/* body: charcoal puck */}
       <mesh castShadow receiveShadow>
         <cylinderGeometry args={[0.82, 0.82, 0.42, 64]} />
@@ -516,28 +524,32 @@ function FinderPuck({ mode, stickerWorldPos, hintRef }) {
   )
 }
 
-/* faint travelling dots from puck toward the laptop while seeking */
+/* glowing signal that arcs across the room from the puck to the laptop while seeking */
 function SignalDots({ stickerWorldPos }) {
   const refs = useRef([])
-  const N = 5
+  const N = 7
+  const a = useMemo(() => new THREE.Vector3(), [])
+  const b = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }) => {
     const t = clock.elapsedTime
-    const a = new THREE.Vector3(PUCK_POS[0], 0.5, PUCK_POS[2])
-    const b = new THREE.Vector3(stickerWorldPos.current.x, 0.7, stickerWorldPos.current.z)
+    a.set(PUCK_POS[0], PUCK_POS[1] + 0.1, PUCK_POS[2])
+    b.set(stickerWorldPos.current.x, stickerWorldPos.current.y + 0.5, stickerWorldPos.current.z)
+    const lift = 0.6 + a.distanceTo(b) * 0.12 // arc higher over longer trips
     for (let i = 0; i < N; i++) {
       const m = refs.current[i]
       if (!m) continue
-      const p = (t * 0.45 + i / N) % 1
+      const p = (t * 0.4 + i / N) % 1
       m.position.lerpVectors(a, b, p)
-      m.material.opacity = 0.5 * Math.sin(Math.PI * p)
+      m.position.y += Math.sin(Math.PI * p) * lift // parabolic arc
+      m.material.opacity = 0.55 * Math.sin(Math.PI * p)
     }
   })
   return (
     <>
       {Array.from({ length: N }, (_, i) => (
         <mesh key={i} ref={(el) => (refs.current[i] = el)}>
-          <sphereGeometry args={[0.05, 12, 12]} />
-          <meshBasicMaterial color="#3fa9ff" transparent opacity={0} />
+          <sphereGeometry args={[0.06, 12, 12]} />
+          <meshBasicMaterial color="#3fa9ff" transparent opacity={0} toneMapped={false} />
         </mesh>
       ))}
     </>
@@ -924,6 +936,160 @@ function ExplodedSticker({ closing, onClosed }) {
   )
 }
 
+/* ---------------- Room: a warm dollhouse-corner bedroom ---------------- */
+
+function Room() {
+  return (
+    <group>
+      {/* floor — warm oak */}
+      <mesh position={[0, 0, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[17, 13]} />
+        <meshStandardMaterial color="#c79a63" roughness={0.85} />
+      </mesh>
+      {/* subtle plank seams */}
+      {[-4, -2, 0, 2, 4].map((z) => (
+        <mesh key={z} position={[0, 0.005, z]} rotation={[-Math.PI / 2, 0, 0]}>
+          <planeGeometry args={[17, 0.03]} />
+          <meshBasicMaterial color="#b0834f" transparent opacity={0.5} />
+        </mesh>
+      ))}
+
+      {/* back + left walls — warm plaster */}
+      <mesh position={[0, 3, -5.2]} receiveShadow>
+        <planeGeometry args={[17, 6.4]} />
+        <meshStandardMaterial color="#efe7da" roughness={1} />
+      </mesh>
+      <mesh position={[-7.4, 3, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
+        <planeGeometry args={[13, 6.4]} />
+        <meshStandardMaterial color="#e7ddcd" roughness={1} />
+      </mesh>
+      {/* baseboards */}
+      <mesh position={[0, 0.12, -5.16]}>
+        <boxGeometry args={[17, 0.24, 0.06]} />
+        <meshStandardMaterial color="#f6f1e9" roughness={0.9} />
+      </mesh>
+      <mesh position={[-7.36, 0.12, 0]}>
+        <boxGeometry args={[0.06, 0.24, 13]} />
+        <meshStandardMaterial color="#f6f1e9" roughness={0.9} />
+      </mesh>
+
+      {/* a framed window on the back wall for warmth + light motivation */}
+      <group position={[-2.3, 3.4, -5.14]}>
+        <mesh>
+          <boxGeometry args={[2.6, 2.2, 0.08]} />
+          <meshStandardMaterial color="#f6f1e9" roughness={0.8} />
+        </mesh>
+        <mesh position={[0, 0, 0.02]}>
+          <planeGeometry args={[2.3, 1.9]} />
+          <meshStandardMaterial color="#cfe3ee" emissive="#e9f2f6" emissiveIntensity={0.4} roughness={0.4} />
+        </mesh>
+        <mesh position={[0, 0, 0.05]}>
+          <boxGeometry args={[0.05, 1.9, 0.03]} />
+          <meshStandardMaterial color="#f6f1e9" />
+        </mesh>
+        <mesh position={[0, 0, 0.05]}>
+          <boxGeometry args={[2.3, 0.05, 0.03]} />
+          <meshStandardMaterial color="#f6f1e9" />
+        </mesh>
+      </group>
+
+      {/* rug */}
+      <mesh position={[-0.4, 0.02, 0.6]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[5.4, 4.4]} />
+        <meshStandardMaterial color="#e0d7c5" roughness={0.95} />
+      </mesh>
+      <mesh position={[-0.4, 0.025, 0.6]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[2.35, 2.5, 4, 1]} />
+        <meshBasicMaterial color="#c9bda3" transparent opacity={0.6} side={THREE.DoubleSide} />
+      </mesh>
+
+      <Bed />
+      <Desk />
+      <Nightstand />
+    </group>
+  )
+}
+
+function Bed() {
+  // headboard against the back wall (−z), foot toward the room (+z)
+  return (
+    <group position={[-4.6, 0, -2.4]}>
+      {/* frame / box spring */}
+      <mesh position={[0, 0.28, 0]} castShadow receiveShadow>
+        <boxGeometry args={[3, 0.55, 4.5]} />
+        <meshStandardMaterial color="#5f4130" roughness={0.7} />
+      </mesh>
+      {/* mattress / duvet */}
+      <RoundedBox args={[2.9, 0.5, 4.4]} radius={0.12} smoothness={4} position={[0, 0.8, 0]} castShadow receiveShadow>
+        <meshStandardMaterial color="#f4f1ea" roughness={0.9} />
+      </RoundedBox>
+      {/* headboard */}
+      <mesh position={[0, 0.75, -2.3]} castShadow receiveShadow>
+        <boxGeometry args={[3, 1.5, 0.16]} />
+        <meshStandardMaterial color="#5f4130" roughness={0.7} />
+      </mesh>
+      {/* pillows */}
+      <RoundedBox args={[1.2, 0.28, 0.72]} radius={0.13} smoothness={4} position={[-0.65, 1.12, -1.7]} castShadow>
+        <meshStandardMaterial color="#fbfaf6" roughness={0.95} />
+      </RoundedBox>
+      <RoundedBox args={[1.2, 0.28, 0.72]} radius={0.13} smoothness={4} position={[0.65, 1.12, -1.7]} castShadow>
+        <meshStandardMaterial color="#fbfaf6" roughness={0.95} />
+      </RoundedBox>
+      {/* folded navy throw at the foot */}
+      <RoundedBox args={[2.9, 0.16, 1.1]} radius={0.06} smoothness={4} position={[0, 1.03, 1.5]} castShadow>
+        <meshStandardMaterial color="#26324f" roughness={0.85} />
+      </RoundedBox>
+    </group>
+  )
+}
+
+function Desk() {
+  const legs = [
+    [-1.6, -0.7],
+    [1.6, -0.7],
+    [-1.6, 0.7],
+    [1.6, 0.7],
+  ]
+  return (
+    <group position={[3.6, 0, -3.4]}>
+      {/* top — light oak */}
+      <RoundedBox args={[3.6, 0.12, 1.8]} radius={0.03} smoothness={4} position={[0, 1.35, 0]} castShadow receiveShadow>
+        <meshStandardMaterial color="#d9bb8b" roughness={0.6} />
+      </RoundedBox>
+      {legs.map(([x, z], i) => (
+        <mesh key={i} position={[x, 0.675, z]} castShadow>
+          <boxGeometry args={[0.14, 1.35, 0.14]} />
+          <meshStandardMaterial color="#2b2b2e" roughness={0.5} metalness={0.3} />
+        </mesh>
+      ))}
+    </group>
+  )
+}
+
+function Nightstand() {
+  return (
+    <group position={[-1.9, 0, -3.9]}>
+      <mesh position={[0, 0.55, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.1, 1.1, 0.95]} />
+        <meshStandardMaterial color="#6b4a34" roughness={0.7} />
+      </mesh>
+      <mesh position={[0, 0.55, 0.49]}>
+        <boxGeometry args={[0.9, 0.9, 0.02]} />
+        <meshStandardMaterial color="#7a5540" roughness={0.6} />
+      </mesh>
+      {/* a small warm lamp */}
+      <mesh position={[0, 1.18, 0]} castShadow>
+        <cylinderGeometry args={[0.04, 0.05, 0.25, 12]} />
+        <meshStandardMaterial color="#b9832f" metalness={0.6} roughness={0.4} />
+      </mesh>
+      <mesh position={[0, 1.36, 0]} castShadow>
+        <cylinderGeometry args={[0.22, 0.28, 0.28, 20]} />
+        <meshStandardMaterial color="#f0e2c4" emissive="#f6e6bd" emissiveIntensity={0.6} roughness={0.7} />
+      </mesh>
+    </group>
+  )
+}
+
 /* ---------------- Scene ---------------- */
 
 // reposition the camera when switching modes (OrbitControls takes over after)
@@ -931,22 +1097,23 @@ function CameraRig({ mode }) {
   const { camera } = useThree()
   useEffect(() => {
     if (mode === 'inside') camera.position.set(0.5, 3.6, 9.5)
-    else camera.position.set(0, 9, 12)
+    else camera.position.set(0.6, 8.6, 12.6) // look down into the room corner
   }, [mode, camera])
   return null
 }
 
-function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, closing, onExplodedClosed }) {
+function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, closing, onExplodedClosed }) {
   const inside = mode === 'inside'
   return (
     <>
-      <color attach="background" args={['#f2f3f5']} />
-      <fog attach="fog" args={['#f2f3f5', 20, 34]} />
+      <color attach="background" args={[inside ? '#f2f3f5' : '#e9dfce']} />
 
-      <ambientLight intensity={0.65} />
+      {/* warm key light (window / lamp side), cool fill, gentle back */}
+      <ambientLight intensity={inside ? 0.65 : 0.5} />
       <directionalLight
-        position={[5, 9, 5]}
-        intensity={1.4}
+        position={[6, 10, 6]}
+        intensity={1.45}
+        color={inside ? '#ffffff' : '#fff2e0'}
         castShadow
         shadow-mapSize={[2048, 2048]}
         shadow-camera-left={-12}
@@ -954,28 +1121,30 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, closing, onExplod
         shadow-camera-top={12}
         shadow-camera-bottom={-12}
       />
-      <directionalLight position={[-6, 4, -4]} intensity={0.45} />
-      <directionalLight position={[0, 3, -8]} intensity={0.3} />
+      <directionalLight position={[-6, 5, 2]} intensity={0.4} color="#dce6ff" />
+      <directionalLight position={[-3, 6, -8]} intensity={0.35} color="#fff2e0" />
       <CameraRig mode={mode} />
 
       {inside ? (
-        <ExplodedSticker closing={closing} onClosed={onExplodedClosed} />
+        <>
+          <ExplodedSticker closing={closing} onClosed={onExplodedClosed} />
+          <ContactShadows position={[0, -0.001, 0]} opacity={0.38} scale={30} blur={2.6} far={5} resolution={1024} color="#1a1a1a" />
+        </>
       ) : (
         <>
+          <Room />
           <LaptopWithSticker mode={mode} targetRef={laptopTarget} worldPosRef={stickerWorldPos} />
-          <FinderPuck mode={mode} stickerWorldPos={stickerWorldPos} hintRef={hintRef} />
+          <FinderPuck mode={mode} stickerWorldPos={stickerWorldPos} hintRef={hintRef} spotNameRef={spotNameRef} />
           {mode === 'seek' && <SignalDots stickerWorldPos={stickerWorldPos} />}
         </>
       )}
 
-      <ContactShadows position={[0, -0.001, 0]} opacity={0.38} scale={30} blur={2.6} far={5} resolution={1024} color="#1a1a1a" />
-
       <OrbitControls
         enablePan={false}
-        minDistance={5}
-        maxDistance={20}
-        maxPolarAngle={Math.PI / 2.15}
-        target={inside ? [0, 2.3, 0] : [0, 0.4, 0]}
+        minDistance={6}
+        maxDistance={22}
+        maxPolarAngle={Math.PI / 2.1}
+        target={inside ? [0, 2.3, 0] : [-0.2, 1.1, -2]}
       />
     </>
   )
@@ -1004,20 +1173,28 @@ export default function FinderDemo() {
   const laptopTarget = useRef([...LAPTOP_HOME])
   const stickerWorldPos = useRef(new THREE.Vector3(...LAPTOP_HOME))
   const hintRef = useRef()
+  const spotNameRef = useRef(SPOTS[0].name)
+  const spotIndex = useRef(0)
 
-  // while seeking, roam the laptop to a new position/distance every few seconds
+  // while seeking, the laptop wanders between real spots (bed → desk → …)
   useEffect(() => {
     if (mode !== 'seek') return
-    laptopTarget.current = pickTarget()
-    const id = setInterval(() => {
-      laptopTarget.current = pickTarget()
-    }, 2600)
+    const move = () => {
+      spotIndex.current = nextSpotIndex(spotIndex.current)
+      const spot = SPOTS[spotIndex.current]
+      laptopTarget.current = spot.pos
+      spotNameRef.current = spot.name
+    }
+    move()
+    const id = setInterval(move, 3200)
     return () => clearInterval(id)
   }, [mode])
 
   const goIdle = () => {
     laptopTarget.current = [...LAPTOP_HOME]
     stickerWorldPos.current.set(...LAPTOP_HOME)
+    spotIndex.current = 0
+    spotNameRef.current = SPOTS[0].name
     setMode('idle')
   }
 
@@ -1036,16 +1213,19 @@ export default function FinderDemo() {
   const subtitle =
     mode === 'inside'
       ? 'Inside the sticker — magnified view, ~3 mm thin in real life'
-      : 'Stick it on your laptop. The Finder points the way.'
+      : mode === 'seek'
+      ? 'Left it somewhere? The Finder points across the room.'
+      : 'Stick it on your laptop. The Finder always knows where it is.'
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100vh' }}>
-      <Canvas shadows dpr={[1, 2]} camera={{ position: [0, 9, 12], fov: 42 }}>
+      <Canvas shadows dpr={[1, 2]} camera={{ position: [0.6, 8.6, 12.6], fov: 44 }}>
         <Scene
           mode={mode}
           laptopTarget={laptopTarget}
           stickerWorldPos={stickerWorldPos}
           hintRef={hintRef}
+          spotNameRef={spotNameRef}
           closing={closing}
           onExplodedClosed={finishClose}
         />
