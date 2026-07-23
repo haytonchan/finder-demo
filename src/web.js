@@ -287,9 +287,9 @@ function Label({ position, children }) {
   )
 }
 
-/* ---------------- Laptop prop with Penn sticker (the tracked item) ---------------- */
+/* ---------------- Phone prop with Penn sticker (the tracked item) ---------------- */
 
-function LaptopWithSticker({ mode, targetRef, worldPosRef }) {
+function PhoneWithSticker({ mode, targetRef, worldPosRef }) {
   const group = useRef()
   const baseY = useRef(LAPTOP_HOME[1]) // resting height, lerped between surfaces
   const pennTex = useStickerTexture()
@@ -310,36 +310,40 @@ function LaptopWithSticker({ mode, targetRef, worldPosRef }) {
 
   return (
     <group ref={group} position={LAPTOP_HOME} scale={0.72}>
-      {/* keyboard deck, receding away from camera */}
-      <RoundedBox args={[2.2, 0.1, 1.5]} radius={0.04} smoothness={4} position={[0, 0.06, -0.72]} castShadow receiveShadow>
-        <meshStandardMaterial color="#c8ccd2" roughness={0.35} metalness={0.75} />
-      </RoundedBox>
-      <mesh position={[0, 0.111, -0.78]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[1.9, 1.05]} />
-        <meshStandardMaterial color="#2b2e33" roughness={0.6} metalness={0.3} />
-      </mesh>
-
-      {/* lid (reclined), sticker adhered flat to its outward face */}
-      <group position={[0, 0.12, 0.06]} rotation={[-0.16, 0, 0]}>
-        <RoundedBox args={[2.2, 1.46, 0.08]} radius={0.04} smoothness={4} position={[0, 0.74, 0]} castShadow receiveShadow>
-          <meshStandardMaterial color="#c8ccd2" roughness={0.35} metalness={0.78} />
+      {/* phone standing upright, reclined slightly, back (with sticker) toward camera */}
+      <group position={[0, 0, 0.06]} rotation={[-0.16, 0, 0]}>
+        {/* body: rounded slab */}
+        <RoundedBox args={[1.0, 2.0, 0.11]} radius={0.11} smoothness={4} position={[0, 1.0, 0]} castShadow receiveShadow>
+          <meshStandardMaterial color="#2b2e33" roughness={0.4} metalness={0.6} />
         </RoundedBox>
 
-        {/* Penn sticker: thin disc (axis along lid normal) + printed decal */}
-        <group position={[0, 0.92, 0.045]} rotation={[Math.PI / 2, 0, 0]}>
+        {/* screen on the far face (away from camera) */}
+        <mesh position={[0, 1.0, -0.061]} rotation={[0, Math.PI, 0]}>
+          <planeGeometry args={[0.86, 1.82]} />
+          <meshStandardMaterial color="#11131a" roughness={0.25} metalness={0.2} emissive="#0a1a3a" emissiveIntensity={0.35} />
+        </mesh>
+
+        {/* camera bump on the back, upper-left */}
+        <mesh position={[-0.28, 1.6, 0.075]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+          <cylinderGeometry args={[0.13, 0.13, 0.03, 32]} />
+          <meshStandardMaterial color="#1a1c22" roughness={0.5} metalness={0.7} />
+        </mesh>
+
+        {/* Penn sticker: thin disc (axis along back normal) + printed decal */}
+        <group position={[0, 0.9, 0.065]} rotation={[Math.PI / 2, 0, 0]}>
           <mesh castShadow>
-            <cylinderGeometry args={[0.44, 0.44, 0.02, 64]} />
+            <cylinderGeometry args={[0.34, 0.34, 0.02, 64]} />
             <meshStandardMaterial color="#ffffff" roughness={0.85} />
           </mesh>
           <mesh position={[0, 0.012, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-            <circleGeometry args={[0.43, 64]} />
+            <circleGeometry args={[0.33, 64]} />
             <meshStandardMaterial map={pennTex} roughness={0.75} transparent />
           </mesh>
           {mode === 'seek' && <PingRing />}
         </group>
       </group>
 
-      <Label position={[0, -0.3, 1.1]}>Sticker (on your laptop)</Label>
+      <Label position={[0, -0.3, 1.1]}>Sticker (on your phone)</Label>
     </group>
   )
 }
@@ -1133,7 +1137,7 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, clos
       ) : (
         <>
           <Room />
-          <LaptopWithSticker mode={mode} targetRef={laptopTarget} worldPosRef={stickerWorldPos} />
+          <PhoneWithSticker mode={mode} targetRef={laptopTarget} worldPosRef={stickerWorldPos} />
           <FinderPuck mode={mode} stickerWorldPos={stickerWorldPos} hintRef={hintRef} spotNameRef={spotNameRef} />
           {mode === 'seek' && <SignalDots stickerWorldPos={stickerWorldPos} />}
         </>
@@ -1215,7 +1219,7 @@ export default function FinderDemo() {
       ? 'Inside the sticker — magnified view, ~3 mm thin in real life'
       : mode === 'seek'
       ? 'Left it somewhere? The Finder points across the room.'
-      : 'Stick it on your laptop. The Finder always knows where it is.'
+      : 'Stick it on your phone. The Finder always knows where it is.'
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100vh' }}>
