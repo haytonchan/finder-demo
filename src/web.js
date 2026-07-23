@@ -18,17 +18,17 @@ import { OrbitControls, ContactShadows, RoundedBox, Html } from '@react-three/dr
 import * as THREE from 'three'
 
 const LED_COUNT = 24
-const PUCK_POS = [4.0, 1.6, -2.9] // resting on the desk
+const PUCK_POS = [4.0, 1.5, -5.6] // resting on the desk
 const UNITS_TO_FEET = 3.2 // scene units -> "feet" for the distance estimate
 
 // Named resting spots the laptop wanders between, each sitting on a real surface.
 // index 0 is "home" (where it rests while idle).
 const SPOTS = [
-  { name: 'On the bed', pos: [-4.6, 1.05, -2.4] },
-  { name: 'On the desk', pos: [2.4, 1.42, -4.0] },
-  { name: 'On the nightstand', pos: [-1.8, 1.13, -3.9] },
+  { name: 'On the bed', pos: [-6.6, 1.05, -4.2] },
+  { name: 'On the desk', pos: [4.0, 1.42, -6.0] },
+  { name: 'On the nightstand', pos: [-4.3, 1.13, -6.3] },
   { name: 'On the rug', pos: [0.3, 0.04, 0.9] },
-  { name: 'At the foot of the bed', pos: [-3.0, 1.05, -0.6] },
+  { name: 'At the foot of the bed', pos: [-5.5, 1.05, -1.9] },
 ]
 const LAPTOP_HOME = SPOTS[0].pos
 const nextSpotIndex = (prev) => {
@@ -39,6 +39,73 @@ const nextSpotIndex = (prev) => {
 
 const IDLE_COLOR = new THREE.Color('#38e0c8') // teal sweep while idle
 const SEEK_COLOR = new THREE.Color('#3fa9ff') // blue lock when seeking
+const FOUND_COLOR = new THREE.Color('#2fd36f') // green when the phone is found
+
+/* ---------------- Playable game: layout, collision, hiding spots ---------------- */
+
+// Walkable rectangle (inside the four walls), with a small player radius margin.
+// Big room: interior roughly x[-9.5,9.5], z[-7,7].
+const ROOM = { minX: -9.3, maxX: 9.3, minZ: -6.8, maxZ: 6.8 }
+const PLAYER_RADIUS = 0.42
+const EYE_HEIGHT = 1.62
+const FOUND_DISTANCE = 1.8 // within this many units of the phone = found
+const PLAYER_START = [2.5, 5.6] // open floor near the front, facing into the room
+
+// Furniture footprints the player can't walk through (world XZ, half-extents).
+// Kept a touch tight so you can squeeze past clutter while hunting.
+// NOTE: these must match the furniture render positions below; reachability of
+// every HIDING_SPOT from PLAYER_START was verified with a flood-fill.
+const BLOCKERS = [
+  { x: -6.6, z: -4.2, hx: 1.55, hz: 2.3 }, // bed
+  { x: -4.3, z: -6.3, hx: 0.62, hz: 0.55 },// nightstand
+  { x: 4.0, z: -6.0, hx: 1.9, hz: 1.0 },   // desk
+  { x: 2.6, z: -4.3, hx: 0.5, hz: 0.5 },   // desk chair
+  { x: 8.3, z: -5.7, hx: 1.1, hz: 1.0 },   // wardrobe
+  { x: -8.8, z: 2.9, hx: 0.98, hz: 0.7 },  // dresser
+  { x: 9.3, z: 1.0, hx: 0.55, hz: 1.6 },   // bookshelf
+  { x: -4.5, z: 5.2, hx: 0.62, hz: 0.62 }, // laundry basket
+  { x: -6.3, z: 5.6, hx: 0.75, hz: 0.75 }, // beanbag
+  { x: 8.0, z: 5.7, hx: 0.95, hz: 0.95 },  // box pile
+  { x: -1.0, z: 6.0, hx: 1.7, hz: 0.7 },   // sofa
+  { x: -1.0, z: 4.0, hx: 0.95, hz: 0.55 }, // coffee table
+  { x: 6.5, z: 3.6, hx: 0.9, hz: 0.9 },    // storage crates
+  { x: 9.3, z: -2.8, hx: 0.55, hz: 1.2 },  // tall shelf
+  { x: -9.0, z: 6.3, hx: 0.45, hz: 0.45 }, // corner plant
+]
+
+// Candidate hiding places — each tucked into a corner or behind a piece, so
+// it's genuinely hard to spot, but reachable (verified). name shows on the win card.
+const HIDING_SPOTS = [
+  { name: 'in the corner between the bed and the wall', pos: [-9.0, 0.06, -4.0], scale: 0.7 },
+  { name: 'behind the wardrobe', pos: [6.9, 0.06, -4.0], scale: 0.7 },
+  { name: 'beside the sofa', pos: [-3.4, 0.06, 6.0], scale: 0.68 },
+  { name: 'in the corner behind the desk', pos: [5.9, 0.06, -6.3], scale: 0.66 },
+  { name: 'tucked by the dresser', pos: [-8.6, 0.06, 1.5], scale: 0.7 },
+  { name: 'behind the beanbag', pos: [-6.3, 0.06, 6.3], scale: 0.68 },
+  { name: 'behind the moving boxes', pos: [8.0, 0.06, 6.6], scale: 0.68 },
+  { name: 'beside the crates', pos: [5.0, 0.06, 4.2], scale: 0.7 },
+  { name: 'by the tall shelf', pos: [8.2, 0.06, -2.8], scale: 0.68 },
+]
+const pickHidingSpot = () => HIDING_SPOTS[Math.floor(Math.random() * HIDING_SPOTS.length)]
+
+// Slide a candidate position out of walls + furniture (per-axis so you glide along).
+function resolveMove(prevX, prevZ, nextX, nextZ) {
+  const cx = clamp(nextX, ROOM.minX, ROOM.maxX)
+  const cz = clamp(prevZ, ROOM.minZ, ROOM.maxZ)
+  let x = cx
+  let z = clamp(nextZ, ROOM.minZ, ROOM.maxZ)
+  const hits = (px, pz) =>
+    BLOCKERS.some(
+      (b) =>
+        px > b.x - b.hx - PLAYER_RADIUS &&
+        px < b.x + b.hx + PLAYER_RADIUS &&
+        pz > b.z - b.hz - PLAYER_RADIUS &&
+        pz < b.z + b.hz + PLAYER_RADIUS
+    )
+  if (hits(x, prevZ)) x = prevX // blocked moving in X → keep old X
+  if (hits(x, z)) z = prevZ     // blocked moving in Z → keep old Z
+  return [x, z]
+}
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const smooth = (x) => x * x * (3 - 2 * x)
@@ -289,9 +356,9 @@ function Label({ position, children }) {
 
 /* ---------------- Phone prop with Penn sticker (the tracked item) ---------------- */
 
-function PhoneWithSticker({ mode, targetRef, worldPosRef }) {
+function PhoneWithSticker({ mode, targetRef, worldPosRef, revealed = true, found = false, scale = 0.72 }) {
   const group = useRef()
-  const baseY = useRef(LAPTOP_HOME[1]) // resting height, lerped between surfaces
+  const baseY = useRef(targetRef.current[1]) // resting height, lerped between surfaces
   const pennTex = useStickerTexture()
 
   useFrame((_, delta) => {
@@ -309,7 +376,9 @@ function PhoneWithSticker({ mode, targetRef, worldPosRef }) {
   })
 
   return (
-    <group ref={group} position={LAPTOP_HOME} scale={0.72}>
+    <group ref={group} position={targetRef.current} scale={scale}>
+      {/* celebratory glow once the player finds it */}
+      {found && <pointLight position={[0, 1, 0.4]} color="#4be08a" intensity={6} distance={4} decay={2} />}
       {/* phone standing upright, reclined slightly, back (with sticker) toward camera */}
       <group position={[0, 0, 0.06]} rotation={[-0.16, 0, 0]}>
         {/* body: rounded slab */}
@@ -339,11 +408,13 @@ function PhoneWithSticker({ mode, targetRef, worldPosRef }) {
             <circleGeometry args={[0.33, 64]} />
             <meshStandardMaterial map={pennTex} roughness={0.75} transparent />
           </mesh>
-          {mode === 'seek' && <PingRing />}
+          {(mode === 'seek' || found) && <PingRing />}
         </group>
       </group>
 
-      <Label position={[0, -0.3, 1.1]}>Sticker (on your phone)</Label>
+      {revealed && (
+        <Label position={[0, -0.3, 1.1]}>{found ? 'Found it!' : 'Sticker (on your phone)'}</Label>
+      )}
     </group>
   )
 }
@@ -367,6 +438,112 @@ function PingRing() {
 
 /* ---------------- Finder puck: LED ring + on-device screen ---------------- */
 
+// Shared LED ring layout so the desk puck and the in-hand replica are identical.
+const LED_LAYOUT = Array.from({ length: LED_COUNT }, (_, i) => {
+  const a = (i / LED_COUNT) * Math.PI * 2
+  return { angle: a, pos: [Math.cos(a) * 0.72, 0, -Math.sin(a) * 0.72] }
+})
+
+// The physical device, built once and reused wherever a Finder is shown.
+function PuckVisual({ screenTex, ledRefs }) {
+  return (
+    <>
+      {/* body: charcoal puck */}
+      <mesh castShadow receiveShadow>
+        <cylinderGeometry args={[0.82, 0.82, 0.42, 64]} />
+        <meshStandardMaterial color="#2b2b2e" roughness={0.45} metalness={0.35} />
+      </mesh>
+      {/* recessed LED channel */}
+      <mesh position={[0, 0.21, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.64, 0.78, 64]} />
+        <meshStandardMaterial color="#1c1c1f" roughness={0.6} side={THREE.DoubleSide} />
+      </mesh>
+      {/* screen bezel + display face */}
+      <mesh position={[0, 0.215, 0]}>
+        <cylinderGeometry args={[0.63, 0.66, 0.02, 64]} />
+        <meshStandardMaterial color="#141417" roughness={0.3} metalness={0.5} />
+      </mesh>
+      <mesh position={[0, 0.227, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[0.58, 64]} />
+        <meshBasicMaterial map={screenTex} toneMapped={false} />
+      </mesh>
+
+      {/* LED segments */}
+      {LED_LAYOUT.map((l, i) => (
+        <mesh
+          key={i}
+          ref={(el) => (ledRefs.current[i] = el)}
+          position={[l.pos[0], 0.225, l.pos[2]]}
+          rotation={[0, l.angle, 0]}
+        >
+          <boxGeometry args={[0.07, 0.02, 0.14]} />
+          <meshStandardMaterial color="#0f3d38" emissive={IDLE_COLOR} emissiveIntensity={0.1} toneMapped={false} />
+        </mesh>
+      ))}
+
+      {/* keychain loop + lug */}
+      <group position={[-1.02, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <mesh castShadow>
+          <torusGeometry args={[0.26, 0.055, 16, 40]} />
+          <meshStandardMaterial color="#b9bcc2" roughness={0.3} metalness={0.9} />
+        </mesh>
+      </group>
+      <mesh position={[-0.84, 0, 0]} castShadow>
+        <boxGeometry args={[0.22, 0.2, 0.3]} />
+        <meshStandardMaterial color="#2b2b2e" roughness={0.45} metalness={0.35} />
+      </mesh>
+    </>
+  )
+}
+
+// Draw the round device screen: a direction arrow + distance (or idle sweep).
+function drawPuckScreen(ctx, { sweep, feet, near, seeking, t }) {
+  ctx.clearRect(0, 0, 256, 256)
+  ctx.fillStyle = '#08090b'
+  ctx.beginPath()
+  ctx.arc(128, 128, 128, 0, Math.PI * 2)
+  ctx.fill()
+  if (seeking) {
+    const phi = -sweep
+    ctx.save()
+    ctx.translate(128, 104)
+    ctx.rotate(phi)
+    ctx.strokeStyle = near ? '#2fd36f' : '#3fa9ff'
+    ctx.fillStyle = near ? '#2fd36f' : '#3fa9ff'
+    ctx.lineWidth = 16
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.moveTo(-38, 0)
+    ctx.lineTo(26, 0)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(58, 0)
+    ctx.lineTo(18, -24)
+    ctx.lineTo(18, 24)
+    ctx.closePath()
+    ctx.fill()
+    ctx.restore()
+    ctx.fillStyle = '#ffffff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.font = '700 46px -apple-system, "Helvetica Neue", Arial, sans-serif'
+    ctx.fillText(near ? 'Here' : `${feet} ft`, 128, 196)
+  } else {
+    const phi = -sweep
+    ctx.strokeStyle = 'rgba(56,224,200,0.35)'
+    ctx.lineWidth = 6
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.moveTo(128, 128)
+    ctx.lineTo(128 + Math.cos(phi) * 88, 128 + Math.sin(phi) * 88)
+    ctx.stroke()
+    ctx.fillStyle = `rgba(56,224,200,${0.5 + 0.3 * Math.sin(t * 2.5)})`
+    ctx.beginPath()
+    ctx.arc(128, 128, 10, 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
 function FinderPuck({ mode, stickerWorldPos, hintRef, spotNameRef }) {
   const ledRefs = useRef([])
   const sweep = useRef(0)
@@ -379,14 +556,7 @@ function FinderPuck({ mode, stickerWorldPos, hintRef, spotNameRef }) {
     return { ctx: c.getContext('2d'), tex }
   }, [])
 
-  const leds = useMemo(
-    () =>
-      Array.from({ length: LED_COUNT }, (_, i) => {
-        const a = (i / LED_COUNT) * Math.PI * 2
-        return { angle: a, pos: [Math.cos(a) * 0.72, 0, -Math.sin(a) * 0.72] }
-      }),
-    []
-  )
+  const leds = LED_LAYOUT
 
   useFrame(({ clock }, delta) => {
     const t = clock.elapsedTime
@@ -420,55 +590,7 @@ function FinderPuck({ mode, stickerWorldPos, hintRef, spotNameRef }) {
       hintRef.current.textContent = near ? 'Right here' : `${where} · ≈ ${feet} ft away`
     }
 
-    /* ---- draw the on-device screen (viewed from above: +X right, +Z down) ---- */
-    const ctx = screen.ctx
-    ctx.clearRect(0, 0, 256, 256)
-    ctx.fillStyle = '#08090b'
-    ctx.beginPath()
-    ctx.arc(128, 128, 128, 0, Math.PI * 2)
-    ctx.fill()
-
-    if (mode === 'seek') {
-      const phi = -sweep.current // canvas angle for the eased bearing
-      ctx.save()
-      ctx.translate(128, 104)
-      ctx.rotate(phi)
-      ctx.strokeStyle = '#3fa9ff'
-      ctx.fillStyle = '#3fa9ff'
-      ctx.lineWidth = 16
-      ctx.lineCap = 'round'
-      ctx.beginPath()
-      ctx.moveTo(-38, 0)
-      ctx.lineTo(26, 0)
-      ctx.stroke()
-      ctx.beginPath()
-      ctx.moveTo(58, 0)
-      ctx.lineTo(18, -24)
-      ctx.lineTo(18, 24)
-      ctx.closePath()
-      ctx.fill()
-      ctx.restore()
-
-      ctx.fillStyle = '#ffffff'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.font = '700 46px -apple-system, "Helvetica Neue", Arial, sans-serif'
-      ctx.fillText(near ? 'Here' : `${feet} ft`, 128, 196)
-    } else {
-      // idle face: dim sweep line + breathing dot, matching the LED ring
-      const phi = -sweep.current
-      ctx.strokeStyle = 'rgba(56,224,200,0.35)'
-      ctx.lineWidth = 6
-      ctx.lineCap = 'round'
-      ctx.beginPath()
-      ctx.moveTo(128, 128)
-      ctx.lineTo(128 + Math.cos(phi) * 88, 128 + Math.sin(phi) * 88)
-      ctx.stroke()
-      ctx.fillStyle = `rgba(56,224,200,${0.5 + 0.3 * Math.sin(t * 2.5)})`
-      ctx.beginPath()
-      ctx.arc(128, 128, 10, 0, Math.PI * 2)
-      ctx.fill()
-    }
+    drawPuckScreen(screen.ctx, { sweep: sweep.current, feet, near, seeking: mode === 'seek', t })
     screen.tex.needsUpdate = true
   })
 
@@ -478,51 +600,7 @@ function FinderPuck({ mode, stickerWorldPos, hintRef, spotNameRef }) {
       {mode === 'seek' && (
         <pointLight position={[0, 0.7, 0]} color="#3fa9ff" intensity={5} distance={4} decay={2} />
       )}
-      {/* body: charcoal puck */}
-      <mesh castShadow receiveShadow>
-        <cylinderGeometry args={[0.82, 0.82, 0.42, 64]} />
-        <meshStandardMaterial color="#2b2b2e" roughness={0.45} metalness={0.35} />
-      </mesh>
-      {/* recessed LED channel */}
-      <mesh position={[0, 0.21, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.64, 0.78, 64]} />
-        <meshStandardMaterial color="#1c1c1f" roughness={0.6} side={THREE.DoubleSide} />
-      </mesh>
-      {/* screen bezel + display face */}
-      <mesh position={[0, 0.215, 0]}>
-        <cylinderGeometry args={[0.63, 0.66, 0.02, 64]} />
-        <meshStandardMaterial color="#141417" roughness={0.3} metalness={0.5} />
-      </mesh>
-      <mesh position={[0, 0.227, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[0.58, 64]} />
-        <meshBasicMaterial map={screen.tex} toneMapped={false} />
-      </mesh>
-
-      {/* LED segments */}
-      {leds.map((l, i) => (
-        <mesh
-          key={i}
-          ref={(el) => (ledRefs.current[i] = el)}
-          position={[l.pos[0], 0.225, l.pos[2]]}
-          rotation={[0, l.angle, 0]}
-        >
-          <boxGeometry args={[0.07, 0.02, 0.14]} />
-          <meshStandardMaterial color="#0f3d38" emissive={IDLE_COLOR} emissiveIntensity={0.1} toneMapped={false} />
-        </mesh>
-      ))}
-
-      {/* keychain loop + lug */}
-      <group position={[-1.02, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <mesh castShadow>
-          <torusGeometry args={[0.26, 0.055, 16, 40]} />
-          <meshStandardMaterial color="#b9bcc2" roughness={0.3} metalness={0.9} />
-        </mesh>
-      </group>
-      <mesh position={[-0.84, 0, 0]} castShadow>
-        <boxGeometry args={[0.22, 0.2, 0.3]} />
-        <meshStandardMaterial color="#2b2b2e" roughness={0.45} metalness={0.35} />
-      </mesh>
-
+      <PuckVisual screenTex={screen.tex} ledRefs={ledRefs} />
       <Label position={[0, -0.6, 1.1]}>Finder (keychain/wristband)</Label>
     </group>
   )
@@ -945,65 +1023,67 @@ function ExplodedSticker({ closing, onClosed }) {
 function Room() {
   return (
     <group>
-      {/* floor — warm oak */}
+      {/* floor — warm oak (big room) */}
       <mesh position={[0, 0, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[17, 13]} />
+        <planeGeometry args={[21, 16]} />
         <meshStandardMaterial color="#c79a63" roughness={0.85} />
       </mesh>
       {/* subtle plank seams */}
-      {[-4, -2, 0, 2, 4].map((z) => (
+      {[-6, -4, -2, 0, 2, 4, 6].map((z) => (
         <mesh key={z} position={[0, 0.005, z]} rotation={[-Math.PI / 2, 0, 0]}>
-          <planeGeometry args={[17, 0.03]} />
+          <planeGeometry args={[21, 0.03]} />
           <meshBasicMaterial color="#b0834f" transparent opacity={0.5} />
         </mesh>
       ))}
 
       {/* back + left walls — warm plaster */}
-      <mesh position={[0, 3, -5.2]} receiveShadow>
-        <planeGeometry args={[17, 6.4]} />
+      <mesh position={[0, 3, -7.1]} receiveShadow>
+        <planeGeometry args={[21, 6.4]} />
         <meshStandardMaterial color="#efe7da" roughness={1} />
       </mesh>
-      <mesh position={[-7.4, 3, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
-        <planeGeometry args={[13, 6.4]} />
+      <mesh position={[-9.6, 3, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
+        <planeGeometry args={[16, 6.4]} />
         <meshStandardMaterial color="#e7ddcd" roughness={1} />
       </mesh>
       {/* baseboards */}
-      <mesh position={[0, 0.12, -5.16]}>
-        <boxGeometry args={[17, 0.24, 0.06]} />
+      <mesh position={[0, 0.12, -7.06]}>
+        <boxGeometry args={[21, 0.24, 0.06]} />
         <meshStandardMaterial color="#f6f1e9" roughness={0.9} />
       </mesh>
-      <mesh position={[-7.36, 0.12, 0]}>
-        <boxGeometry args={[0.06, 0.24, 13]} />
+      <mesh position={[-9.56, 0.12, 0]}>
+        <boxGeometry args={[0.06, 0.24, 16]} />
         <meshStandardMaterial color="#f6f1e9" roughness={0.9} />
       </mesh>
 
-      {/* a framed window on the back wall for warmth + light motivation */}
-      <group position={[-2.3, 3.4, -5.14]}>
-        <mesh>
-          <boxGeometry args={[2.6, 2.2, 0.08]} />
-          <meshStandardMaterial color="#f6f1e9" roughness={0.8} />
-        </mesh>
-        <mesh position={[0, 0, 0.02]}>
-          <planeGeometry args={[2.3, 1.9]} />
-          <meshStandardMaterial color="#cfe3ee" emissive="#e9f2f6" emissiveIntensity={0.4} roughness={0.4} />
-        </mesh>
-        <mesh position={[0, 0, 0.05]}>
-          <boxGeometry args={[0.05, 1.9, 0.03]} />
-          <meshStandardMaterial color="#f6f1e9" />
-        </mesh>
-        <mesh position={[0, 0, 0.05]}>
-          <boxGeometry args={[2.3, 0.05, 0.03]} />
-          <meshStandardMaterial color="#f6f1e9" />
-        </mesh>
-      </group>
+      {/* two framed windows on the back wall for warmth + light motivation */}
+      {[-3.4, 2.6].map((x) => (
+        <group key={x} position={[x, 3.4, -7.04]}>
+          <mesh>
+            <boxGeometry args={[2.6, 2.2, 0.08]} />
+            <meshStandardMaterial color="#f6f1e9" roughness={0.8} />
+          </mesh>
+          <mesh position={[0, 0, 0.02]}>
+            <planeGeometry args={[2.3, 1.9]} />
+            <meshStandardMaterial color="#cfe3ee" emissive="#e9f2f6" emissiveIntensity={0.4} roughness={0.4} />
+          </mesh>
+          <mesh position={[0, 0, 0.05]}>
+            <boxGeometry args={[0.05, 1.9, 0.03]} />
+            <meshStandardMaterial color="#f6f1e9" />
+          </mesh>
+          <mesh position={[0, 0, 0.05]}>
+            <boxGeometry args={[2.3, 0.05, 0.03]} />
+            <meshStandardMaterial color="#f6f1e9" />
+          </mesh>
+        </group>
+      ))}
 
       {/* rug */}
-      <mesh position={[-0.4, 0.02, 0.6]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[5.4, 4.4]} />
+      <mesh position={[0.3, 0.02, 0.9]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[7.2, 5.6]} />
         <meshStandardMaterial color="#e0d7c5" roughness={0.95} />
       </mesh>
-      <mesh position={[-0.4, 0.025, 0.6]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[2.35, 2.5, 4, 1]} />
+      <mesh position={[0.3, 0.025, 0.9]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[3.1, 3.28, 4, 1]} />
         <meshBasicMaterial color="#c9bda3" transparent opacity={0.6} side={THREE.DoubleSide} />
       </mesh>
 
@@ -1017,7 +1097,7 @@ function Room() {
 function Bed() {
   // headboard against the back wall (−z), foot toward the room (+z)
   return (
-    <group position={[-4.6, 0, -2.4]}>
+    <group position={[-6.6, 0, -4.2]}>
       {/* frame / box spring */}
       <mesh position={[0, 0.28, 0]} castShadow receiveShadow>
         <boxGeometry args={[3, 0.55, 4.5]} />
@@ -1055,7 +1135,7 @@ function Desk() {
     [1.6, 0.7],
   ]
   return (
-    <group position={[3.6, 0, -3.4]}>
+    <group position={[4.0, 0, -6.0]}>
       {/* top — light oak */}
       <RoundedBox args={[3.6, 0.12, 1.8]} radius={0.03} smoothness={4} position={[0, 1.35, 0]} castShadow receiveShadow>
         <meshStandardMaterial color="#d9bb8b" roughness={0.6} />
@@ -1072,7 +1152,7 @@ function Desk() {
 
 function Nightstand() {
   return (
-    <group position={[-1.9, 0, -3.9]}>
+    <group position={[-4.3, 0, -6.3]}>
       <mesh position={[0, 0.55, 0]} castShadow receiveShadow>
         <boxGeometry args={[1.1, 1.1, 0.95]} />
         <meshStandardMaterial color="#6b4a34" roughness={0.7} />
@@ -1094,20 +1174,695 @@ function Nightstand() {
   )
 }
 
+/* ---------------- Extra clutter + walls, only for the playable hunt ---------------- */
+
+function GameRoomExtras() {
+  return (
+    <group>
+      {/* front + right walls so the room is fully enclosed for first-person play */}
+      <mesh position={[0, 3, 7.1]} rotation={[0, Math.PI, 0]} receiveShadow>
+        <planeGeometry args={[21, 6.4]} />
+        <meshStandardMaterial color="#ece3d4" roughness={1} />
+      </mesh>
+      <mesh position={[9.6, 3, 0]} rotation={[0, -Math.PI / 2, 0]} receiveShadow>
+        <planeGeometry args={[16, 6.4]} />
+        <meshStandardMaterial color="#e7ddcd" roughness={1} />
+      </mesh>
+
+      <Wardrobe />
+      <Bookshelf />
+      <Dresser />
+      <Beanbag />
+      <LaundryBasket />
+      <BoxPile />
+      <DeskChair />
+      <Sofa />
+      <CoffeeTable />
+      <Crates />
+      <TallShelf />
+      <CornerPlant />
+      <FloorClutter />
+      <ExtraProps />
+    </group>
+  )
+}
+
+function Wardrobe() {
+  return (
+    <group position={[8.3, 0, -5.7]}>
+      <mesh position={[0, 1.5, 0]} castShadow receiveShadow>
+        <boxGeometry args={[2.0, 3.0, 1.6]} />
+        <meshStandardMaterial color="#6b4a34" roughness={0.7} />
+      </mesh>
+      {/* two doors + handles */}
+      {[-0.5, 0.5].map((x) => (
+        <mesh key={x} position={[x, 1.5, 0.81]}>
+          <boxGeometry args={[0.94, 2.86, 0.04]} />
+          <meshStandardMaterial color="#7a5540" roughness={0.6} />
+        </mesh>
+      ))}
+      {[-0.1, 0.1].map((x) => (
+        <mesh key={x} position={[x, 1.5, 0.86]}>
+          <cylinderGeometry args={[0.03, 0.03, 0.24, 12]} />
+          <meshStandardMaterial color="#c9ccd2" metalness={0.8} roughness={0.3} />
+        </mesh>
+      ))}
+    </group>
+  )
+}
+
+function Bookshelf() {
+  const shelves = [0.5, 1.35, 2.2, 3.05]
+  const bookColors = ['#9E1B34', '#01285C', '#2f6b4f', '#caa04e', '#7a4a80', '#c96a3a']
+  return (
+    <group position={[9.3, 0, 1.0]}>
+      {/* carcass against the right wall */}
+      <mesh position={[0, 1.8, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.5, 3.6, 3.0]} />
+        <meshStandardMaterial color="#8a6647" roughness={0.7} />
+      </mesh>
+      {shelves.map((y, si) => (
+        <group key={y}>
+          <mesh position={[-0.05, y, 0]}>
+            <boxGeometry args={[0.42, 0.05, 2.9]} />
+            <meshStandardMaterial color="#6b4a34" roughness={0.6} />
+          </mesh>
+          {/* a leaning row of books per shelf */}
+          {Array.from({ length: 7 }, (_, bi) => (
+            <mesh
+              key={bi}
+              position={[-0.05, y + 0.32, -1.2 + bi * 0.34]}
+              rotation={[0, 0, bi === 6 ? 0.5 : 0]}
+              castShadow
+            >
+              <boxGeometry args={[0.3, 0.56, 0.12]} />
+              <meshStandardMaterial color={bookColors[(si + bi) % bookColors.length]} roughness={0.8} />
+            </mesh>
+          ))}
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function Dresser() {
+  return (
+    <group position={[-8.8, 0, 2.9]}>
+      <mesh position={[0, 0.6, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.9, 1.2, 1.2]} />
+        <meshStandardMaterial color="#6b4a34" roughness={0.7} />
+      </mesh>
+      {[0.35, 0.85].map((y) =>
+        [-0.47, 0.47].map((x) => (
+          <mesh key={`${x}-${y}`} position={[x, y, 0.61]}>
+            <boxGeometry args={[0.82, 0.4, 0.04]} />
+            <meshStandardMaterial color="#7a5540" roughness={0.6} />
+          </mesh>
+        ))
+      )}
+      {/* a potted plant on top */}
+      <mesh position={[0.55, 1.32, 0]} castShadow>
+        <cylinderGeometry args={[0.16, 0.12, 0.24, 16]} />
+        <meshStandardMaterial color="#b5654a" roughness={0.8} />
+      </mesh>
+      <mesh position={[0.55, 1.62, 0]} castShadow>
+        <sphereGeometry args={[0.28, 16, 12]} />
+        <meshStandardMaterial color="#4f7a4d" roughness={0.85} />
+      </mesh>
+    </group>
+  )
+}
+
+function Beanbag() {
+  return (
+    <group position={[-6.3, 0, 5.6]}>
+      <mesh position={[0, 0.42, 0]} castShadow receiveShadow>
+        <sphereGeometry args={[0.85, 20, 16]} />
+        <meshStandardMaterial color="#c9803f" roughness={0.95} />
+      </mesh>
+      <mesh position={[0, 0.72, 0]} castShadow>
+        <sphereGeometry args={[0.55, 20, 16]} />
+        <meshStandardMaterial color="#d89153" roughness={0.95} />
+      </mesh>
+    </group>
+  )
+}
+
+function LaundryBasket() {
+  return (
+    <group position={[-4.5, 0, 5.2]}>
+      <mesh position={[0, 0.5, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.55, 0.45, 1.0, 20]} />
+        <meshStandardMaterial color="#d7c9a8" roughness={0.9} />
+      </mesh>
+      {/* spilling clothes */}
+      <mesh position={[0.1, 1.05, 0]} castShadow>
+        <sphereGeometry args={[0.5, 16, 12]} />
+        <meshStandardMaterial color="#8a97b8" roughness={1} />
+      </mesh>
+      <mesh position={[0.5, 0.3, 0.4]} rotation={[0, 0.6, 0]} castShadow>
+        <boxGeometry args={[0.7, 0.14, 0.5]} />
+        <meshStandardMaterial color="#b96b6b" roughness={1} />
+      </mesh>
+    </group>
+  )
+}
+
+function BoxPile() {
+  return (
+    <group position={[8.0, 0, 5.7]}>
+      <mesh position={[0, 0.45, 0]} rotation={[0, 0.2, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.1, 0.9, 1.1]} />
+        <meshStandardMaterial color="#c9a15f" roughness={0.9} />
+      </mesh>
+      <mesh position={[0.15, 1.2, -0.1]} rotation={[0, -0.35, 0]} castShadow>
+        <boxGeometry args={[0.8, 0.6, 0.8]} />
+        <meshStandardMaterial color="#d8b374" roughness={0.9} />
+      </mesh>
+      <mesh position={[-0.7, 0.25, 0.6]} rotation={[0, 0.5, 0]} castShadow>
+        <boxGeometry args={[0.55, 0.5, 0.55]} />
+        <meshStandardMaterial color="#bd955a" roughness={0.9} />
+      </mesh>
+    </group>
+  )
+}
+
+function DeskChair() {
+  return (
+    <group position={[2.6, 0, -4.3]} rotation={[0, 0.4, 0]}>
+      <mesh position={[0, 0.55, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.7, 0.12, 0.7]} />
+        <meshStandardMaterial color="#2f3136" roughness={0.6} />
+      </mesh>
+      <mesh position={[0, 1.05, -0.32]} castShadow>
+        <boxGeometry args={[0.7, 0.9, 0.12]} />
+        <meshStandardMaterial color="#2f3136" roughness={0.6} />
+      </mesh>
+      <mesh position={[0, 0.28, 0]} castShadow>
+        <cylinderGeometry args={[0.06, 0.06, 0.5, 12]} />
+        <meshStandardMaterial color="#8a8d93" metalness={0.6} roughness={0.4} />
+      </mesh>
+      {[0, 1, 2, 3, 4].map((i) => {
+        const a = (i / 5) * Math.PI * 2
+        return (
+          <mesh key={i} position={[Math.cos(a) * 0.32, 0.05, Math.sin(a) * 0.32]} castShadow>
+            <boxGeometry args={[0.4, 0.06, 0.1]} />
+            <meshStandardMaterial color="#2f3136" roughness={0.6} />
+          </mesh>
+        )
+      })}
+    </group>
+  )
+}
+
+function Sofa() {
+  // three-seat sofa along the front, facing into the room (−z)
+  return (
+    <group position={[-1.0, 0, 6.0]}>
+      {/* base */}
+      <RoundedBox args={[3.2, 0.5, 1.1]} radius={0.1} smoothness={4} position={[0, 0.45, 0]} castShadow receiveShadow>
+        <meshStandardMaterial color="#5b6b7a" roughness={0.9} />
+      </RoundedBox>
+      {/* back */}
+      <RoundedBox args={[3.2, 0.9, 0.35]} radius={0.1} smoothness={4} position={[0, 0.95, -0.42]} castShadow>
+        <meshStandardMaterial color="#54626f" roughness={0.9} />
+      </RoundedBox>
+      {/* arms */}
+      {[-1.5, 1.5].map((x) => (
+        <RoundedBox key={x} args={[0.32, 0.7, 1.1]} radius={0.1} smoothness={4} position={[x, 0.6, 0]} castShadow>
+          <meshStandardMaterial color="#54626f" roughness={0.9} />
+        </RoundedBox>
+      ))}
+      {/* seat cushions */}
+      {[-1.0, 0, 1.0].map((x) => (
+        <RoundedBox key={x} args={[0.98, 0.24, 0.95]} radius={0.1} smoothness={4} position={[x, 0.72, 0.05]} castShadow>
+          <meshStandardMaterial color="#67788a" roughness={0.9} />
+        </RoundedBox>
+      ))}
+      {/* a tossed pillow + blanket */}
+      <RoundedBox args={[0.6, 0.24, 0.5]} radius={0.1} smoothness={4} position={[1.0, 0.95, 0.1]} rotation={[0, 0.4, 0.2]} castShadow>
+        <meshStandardMaterial color="#c17d54" roughness={0.95} />
+      </RoundedBox>
+      <RoundedBox args={[1.1, 0.14, 0.8]} radius={0.06} smoothness={4} position={[-0.8, 0.9, 0.2]} rotation={[0, -0.2, 0]} castShadow>
+        <meshStandardMaterial color="#9a5b5b" roughness={0.95} />
+      </RoundedBox>
+    </group>
+  )
+}
+
+function CoffeeTable() {
+  const legs = [
+    [-0.7, -0.35],
+    [0.7, -0.35],
+    [-0.7, 0.35],
+    [0.7, 0.35],
+  ]
+  return (
+    <group position={[-1.0, 0, 4.0]}>
+      <RoundedBox args={[1.8, 0.12, 1.0]} radius={0.03} smoothness={4} position={[0, 0.5, 0]} castShadow receiveShadow>
+        <meshStandardMaterial color="#7a5540" roughness={0.6} />
+      </RoundedBox>
+      {legs.map(([x, z], i) => (
+        <mesh key={i} position={[x, 0.25, z]} castShadow>
+          <boxGeometry args={[0.1, 0.5, 0.1]} />
+          <meshStandardMaterial color="#5f4130" roughness={0.6} />
+        </mesh>
+      ))}
+      {/* clutter on top: mug, remote, magazine stack */}
+      <mesh position={[0.4, 0.63, 0.1]} castShadow>
+        <cylinderGeometry args={[0.1, 0.09, 0.16, 14]} />
+        <meshStandardMaterial color="#d8d3c8" roughness={0.6} />
+      </mesh>
+      <mesh position={[-0.3, 0.58, -0.1]} rotation={[0, 0.3, 0]} castShadow>
+        <boxGeometry args={[0.5, 0.08, 0.36]} />
+        <meshStandardMaterial color="#3a6b8a" roughness={0.7} />
+      </mesh>
+      <mesh position={[-0.1, 0.6, 0.2]} rotation={[0, -0.2, 0]} castShadow>
+        <boxGeometry args={[0.14, 0.05, 0.34]} />
+        <meshStandardMaterial color="#2f3136" roughness={0.5} />
+      </mesh>
+    </group>
+  )
+}
+
+function Crates() {
+  // stacked storage crates
+  return (
+    <group position={[6.5, 0, 3.6]}>
+      <mesh position={[0, 0.4, 0]} rotation={[0, 0.15, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.0, 0.8, 1.0]} />
+        <meshStandardMaterial color="#7d868f" roughness={0.7} metalness={0.2} />
+      </mesh>
+      <mesh position={[-0.1, 1.05, 0.1]} rotation={[0, -0.25, 0]} castShadow>
+        <boxGeometry args={[0.9, 0.5, 0.9]} />
+        <meshStandardMaterial color="#8a939c" roughness={0.7} metalness={0.2} />
+      </mesh>
+      <mesh position={[0.7, 0.3, 0.5]} rotation={[0, 0.5, 0]} castShadow>
+        <boxGeometry args={[0.6, 0.6, 0.6]} />
+        <meshStandardMaterial color="#6f7880" roughness={0.7} metalness={0.2} />
+      </mesh>
+    </group>
+  )
+}
+
+function TallShelf() {
+  const shelves = [0.4, 1.1, 1.8, 2.5]
+  const colors = ['#9E1B34', '#01285C', '#caa04e', '#2f6b4f', '#7a4a80']
+  return (
+    <group position={[9.3, 0, -2.8]}>
+      <mesh position={[0, 1.5, 0]} castShadow receiveShadow>
+        <boxGeometry args={[0.5, 3.0, 2.2]} />
+        <meshStandardMaterial color="#6b4a34" roughness={0.7} />
+      </mesh>
+      {shelves.map((y, si) => (
+        <group key={y}>
+          <mesh position={[-0.05, y, 0]}>
+            <boxGeometry args={[0.42, 0.05, 2.1]} />
+            <meshStandardMaterial color="#5f4130" roughness={0.6} />
+          </mesh>
+          {Array.from({ length: 5 }, (_, bi) => (
+            <mesh key={bi} position={[-0.05, y + 0.28, -0.8 + bi * 0.36]} castShadow>
+              <boxGeometry args={[0.28, 0.5, 0.14]} />
+              <meshStandardMaterial color={colors[(si + bi) % colors.length]} roughness={0.8} />
+            </mesh>
+          ))}
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function CornerPlant() {
+  // a tall potted plant in the front-left corner
+  return (
+    <group position={[-9.0, 0, 6.3]}>
+      <mesh position={[0, 0.35, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.32, 0.24, 0.7, 18]} />
+        <meshStandardMaterial color="#b5654a" roughness={0.85} />
+      </mesh>
+      <mesh position={[0, 1.2, 0]} castShadow>
+        <cylinderGeometry args={[0.05, 0.06, 1.2, 10]} />
+        <meshStandardMaterial color="#5a4632" roughness={0.8} />
+      </mesh>
+      {[[0, 1.9, 0, 0.55], [0.35, 1.7, 0.1, 0.4], [-0.3, 1.75, -0.15, 0.42], [0.1, 2.15, -0.2, 0.38]].map(
+        ([x, y, z, r], i) => (
+          <mesh key={i} position={[x, y, z]} castShadow>
+            <sphereGeometry args={[r, 14, 12]} />
+            <meshStandardMaterial color={i % 2 ? '#4f7a4d' : '#5c8a56'} roughness={0.9} />
+          </mesh>
+        )
+      )}
+    </group>
+  )
+}
+
+// Lots of stuff strewn across the floor so the room reads as genuinely messy —
+// and so a small phone is easy to lose among the clutter.
+function FloorClutter() {
+  const items = [
+    // scattered books
+    { p: [1.4, 0.05, 1.8], r: 0.3, s: [0.34, 0.09, 0.46], c: '#9E1B34' },
+    { p: [1.9, 0.05, 2.2], r: -0.5, s: [0.34, 0.09, 0.46], c: '#01285C' },
+    { p: [-1.2, 0.05, 1.2], r: 0.8, s: [0.34, 0.09, 0.46], c: '#2f6b4f' },
+    { p: [3.0, 0.05, 1.6], r: 1.1, s: [0.32, 0.08, 0.44], c: '#caa04e' },
+    { p: [-2.6, 0.05, -0.6], r: -0.9, s: [0.34, 0.09, 0.46], c: '#7a4a80' },
+    { p: [0.2, 0.05, 2.6], r: 0.4, s: [0.32, 0.08, 0.44], c: '#c96a3a' },
+    { p: [-3.8, 0.05, 1.4], r: 0.2, s: [0.34, 0.09, 0.46], c: '#2b6b6b' },
+    // crumpled clothes
+    { p: [2.6, 0.12, 0.6], r: 0.2, s: [0.5, 0.2, 0.34], c: '#8a97b8' },
+    { p: [-0.4, 0.1, -1.1], r: -0.3, s: [0.44, 0.16, 0.3], c: '#b96b6b' },
+    { p: [-2.0, 0.12, 2.2], r: 0.9, s: [0.56, 0.2, 0.4], c: '#5a6b8a' },
+    { p: [4.2, 0.12, 1.0], r: -0.6, s: [0.5, 0.18, 0.42], c: '#9a7bb0' },
+    { p: [-4.6, 0.12, -0.2], r: 0.5, s: [0.48, 0.18, 0.36], c: '#c98a5a' },
+    // cups / cans / small junk
+    { p: [0.9, 0.09, -0.4], r: 0.6, s: [0.24, 0.18, 0.24], c: '#d8b374' },
+    { p: [1.1, 0.1, 0.9], r: 0.0, s: [0.18, 0.22, 0.18], c: '#c0c4cc' },
+    { p: [-1.6, 0.09, -0.2], r: 0.3, s: [0.2, 0.2, 0.2], c: '#7a8a5a' },
+    { p: [3.6, 0.08, 0.2], r: 0.7, s: [0.22, 0.16, 0.22], c: '#b95b5b' },
+    // sheets of paper
+    { p: [-0.9, 0.02, 0.4], r: 0.4, s: [0.4, 0.02, 0.52], c: '#f2efe6' },
+    { p: [-1.3, 0.02, 0.9], r: -0.2, s: [0.4, 0.02, 0.52], c: '#f2efe6' },
+    { p: [2.2, 0.02, -0.9], r: 1.0, s: [0.4, 0.02, 0.52], c: '#ece7db' },
+    // spread further out into the bigger room
+    { p: [6.6, 0.05, -0.6], r: 0.5, s: [0.34, 0.09, 0.46], c: '#9E1B34' }, // book
+    { p: [7.4, 0.05, 0.2], r: -0.7, s: [0.32, 0.08, 0.44], c: '#01285C' },
+    { p: [-7.6, 0.05, -2.2], r: 0.9, s: [0.34, 0.09, 0.46], c: '#2f6b4f' },
+    { p: [-6.8, 0.12, 0.8], r: 0.3, s: [0.54, 0.2, 0.4], c: '#8a97b8' },   // clothes
+    { p: [5.4, 0.12, -1.8], r: -0.4, s: [0.5, 0.18, 0.4], c: '#9a7bb0' },
+    { p: [-5.2, 0.12, 3.6], r: 0.8, s: [0.5, 0.18, 0.42], c: '#c98a5a' },
+    { p: [7.0, 0.12, 2.4], r: 0.2, s: [0.48, 0.18, 0.38], c: '#5a6b8a' },
+    { p: [-3.2, 0.09, -2.6], r: 0.6, s: [0.22, 0.16, 0.22], c: '#b95b5b' }, // cup
+    { p: [3.4, 0.09, 3.0], r: 0.1, s: [0.2, 0.2, 0.2], c: '#7a8a5a' },
+    { p: [-7.0, 0.09, 4.8], r: 0.4, s: [0.24, 0.18, 0.24], c: '#d8b374' },
+    { p: [8.2, 0.02, 1.4], r: 0.7, s: [0.4, 0.02, 0.52], c: '#f2efe6' },   // paper
+    { p: [-8.2, 0.02, 0.4], r: -0.3, s: [0.4, 0.02, 0.52], c: '#ece7db' },
+    { p: [0.6, 0.02, 5.0], r: 0.5, s: [0.4, 0.02, 0.52], c: '#f2efe6' },
+    { p: [4.6, 0.05, 5.0], r: 1.2, s: [0.34, 0.09, 0.46], c: '#caa04e' },  // book
+    { p: [-2.0, 0.12, 4.6], r: -0.5, s: [0.52, 0.2, 0.4], c: '#6b8a5a' },  // clothes
+  ]
+  return (
+    <group>
+      {items.map((it, i) => (
+        <mesh key={i} position={it.p} rotation={[0, it.r, 0]} castShadow receiveShadow>
+          <boxGeometry args={it.s} />
+          <meshStandardMaterial color={it.c} roughness={0.97} />
+        </mesh>
+      ))}
+      {/* round floor cushions */}
+      {[[2.0, -0.2, '#c98a5a'], [-2.4, 0.4, '#8a97b8']].map(([x, z, c], i) => (
+        <mesh key={`c${i}`} position={[x, 0.12, z]} castShadow receiveShadow>
+          <cylinderGeometry args={[0.4, 0.4, 0.22, 20]} />
+          <meshStandardMaterial color={c} roughness={0.95} />
+        </mesh>
+      ))}
+      {/* a pair of sneakers kicked off */}
+      {[[-0.2, 3.1, 0.3], [0.15, 3.35, -0.4]].map(([x, z, r], i) => (
+        <mesh key={`s${i}`} position={[x, 0.09, z]} rotation={[0, r, 0]} castShadow>
+          <boxGeometry args={[0.24, 0.16, 0.5]} />
+          <meshStandardMaterial color="#e8e8e6" roughness={0.9} />
+        </mesh>
+      ))}
+      {/* a stray basketball */}
+      <mesh position={[4.0, 0.28, -0.4]} castShadow receiveShadow>
+        <sphereGeometry args={[0.28, 20, 16]} />
+        <meshStandardMaterial color="#c8622c" roughness={0.85} />
+      </mesh>
+    </group>
+  )
+}
+
+// A few standing pieces that add height and hiding shadows to the mess.
+function ExtraProps() {
+  return (
+    <group>
+      {/* floor lamp on the right side */}
+      <group position={[8.7, 0, -0.3]}>
+        <mesh position={[0, 0.05, 0]} castShadow>
+          <cylinderGeometry args={[0.32, 0.32, 0.08, 20]} />
+          <meshStandardMaterial color="#3a3a3e" metalness={0.5} roughness={0.5} />
+        </mesh>
+        <mesh position={[0, 1.1, 0]} castShadow>
+          <cylinderGeometry args={[0.03, 0.03, 2.1, 12]} />
+          <meshStandardMaterial color="#5a5a5e" metalness={0.6} roughness={0.4} />
+        </mesh>
+        <mesh position={[0, 2.15, 0]} castShadow>
+          <cylinderGeometry args={[0.28, 0.34, 0.4, 20]} />
+          <meshStandardMaterial color="#efe3c6" emissive="#f6e6bd" emissiveIntensity={0.4} roughness={0.7} />
+        </mesh>
+      </group>
+
+      {/* guitar leaning in the back-left corner near the bed */}
+      <group position={[-9.1, 0, -5.2]} rotation={[0.16, 0.4, 0.05]}>
+        <mesh position={[0, 0.5, 0]} castShadow>
+          <boxGeometry args={[0.5, 0.12, 0.18]} />
+          <meshStandardMaterial color="#a9662f" roughness={0.6} />
+        </mesh>
+        <mesh position={[0, 1.4, 0]} castShadow>
+          <boxGeometry args={[0.12, 1.5, 0.08]} />
+          <meshStandardMaterial color="#7a4a24" roughness={0.6} />
+        </mesh>
+      </group>
+
+      {/* a tipped stack of books tower near the rug */}
+      <group position={[-2.6, 0, 1.6]}>
+        {[0, 1, 2, 3].map((i) => (
+          <mesh key={i} position={[i * 0.03, 0.06 + i * 0.11, 0]} rotation={[0, i * 0.2, 0]} castShadow>
+            <boxGeometry args={[0.5, 0.1, 0.62]} />
+            <meshStandardMaterial color={['#9E1B34', '#01285C', '#caa04e', '#2f6b4f'][i]} roughness={0.85} />
+          </mesh>
+        ))}
+      </group>
+
+      {/* small trash bin by the desk */}
+      <mesh position={[5.9, 0.28, -4.8]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.28, 0.22, 0.56, 16]} />
+        <meshStandardMaterial color="#4a4d53" metalness={0.4} roughness={0.5} />
+      </mesh>
+
+      {/* a backpack slumped against the bed */}
+      <group position={[-4.9, 0, -2.6]} rotation={[0, 0.5, 0]}>
+        <mesh position={[0, 0.4, 0]} castShadow receiveShadow>
+          <boxGeometry args={[0.6, 0.8, 0.4]} />
+          <meshStandardMaterial color="#37506b" roughness={0.9} />
+        </mesh>
+        <mesh position={[0, 0.42, 0.22]} castShadow>
+          <boxGeometry args={[0.42, 0.44, 0.16]} />
+          <meshStandardMaterial color="#2c4054" roughness={0.9} />
+        </mesh>
+      </group>
+    </group>
+  )
+}
+
+/* ---------------- First-person player + tracker held in hand ---------------- */
+
+function useHeldScreen() {
+  return useMemo(() => {
+    const c = document.createElement('canvas')
+    c.width = c.height = 256
+    const tex = new THREE.CanvasTexture(c)
+    tex.colorSpace = THREE.SRGBColorSpace
+    return { ctx: c.getContext('2d'), tex }
+  }, [])
+}
+
+const HELD_TILT = 1.2 // recline of the in-hand device so its screen faces you
+
+function Player({ phoneWorldPos, onFound, resetKey }) {
+  const { camera, gl } = useThree()
+  const pos = useRef(new THREE.Vector3(PLAYER_START[0], 0, PLAYER_START[1]))
+  const yaw = useRef(0) // face into the furnished room (toward -z)
+  const pitch = useRef(-0.05)
+  const keys = useRef({})
+  const drag = useRef(null)
+  const held = useRef()
+  const foundRef = useRef(false)
+  const screen = useHeldScreen()
+  const heldLedRefs = useRef([])
+  const heldSweep = useRef(0)
+
+  // scratch vectors
+  const fwd = useMemo(() => new THREE.Vector3(), [])
+  const right = useMemo(() => new THREE.Vector3(), [])
+  const up = useMemo(() => new THREE.Vector3(0, 1, 0), [])
+  const d = useMemo(() => new THREE.Vector3(), [])
+  const localDir = useMemo(() => new THREE.Vector3(), [])
+  const qDev = useMemo(() => new THREE.Quaternion(), [])
+  const qInv = useMemo(() => new THREE.Quaternion(), [])
+  const tiltQuat = useMemo(
+    () => new THREE.Quaternion().setFromEuler(new THREE.Euler(HELD_TILT, 0, 0)),
+    []
+  )
+
+  // reset to the doorway each new round
+  useEffect(() => {
+    pos.current.set(PLAYER_START[0], 0, PLAYER_START[1])
+    yaw.current = 0
+    pitch.current = -0.05
+    foundRef.current = false
+  }, [resetKey])
+
+  // keyboard
+  useEffect(() => {
+    const dn = (e) => {
+      keys.current[e.code] = true
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault()
+    }
+    const upH = (e) => (keys.current[e.code] = false)
+    window.addEventListener('keydown', dn)
+    window.addEventListener('keyup', upH)
+    return () => {
+      window.removeEventListener('keydown', dn)
+      window.removeEventListener('keyup', upH)
+    }
+  }, [])
+
+  // drag to look
+  useEffect(() => {
+    const el = gl.domElement
+    el.style.touchAction = 'none'
+    const down = (e) => {
+      drag.current = { x: e.clientX, y: e.clientY }
+      el.setPointerCapture?.(e.pointerId)
+    }
+    const move = (e) => {
+      if (!drag.current) return
+      const dx = e.clientX - drag.current.x
+      const dy = e.clientY - drag.current.y
+      drag.current = { x: e.clientX, y: e.clientY }
+      yaw.current -= dx * 0.004
+      pitch.current = clamp(pitch.current - dy * 0.004, -1.1, 0.5)
+    }
+    const upH = () => (drag.current = null)
+    el.addEventListener('pointerdown', down)
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', upH)
+    el.addEventListener('pointerleave', upH)
+    return () => {
+      el.removeEventListener('pointerdown', down)
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', upH)
+      el.removeEventListener('pointerleave', upH)
+    }
+  }, [gl])
+
+  useFrame((state, delta) => {
+    const t = state.clock.elapsedTime
+    const k = keys.current
+    // turn with arrow keys as a no-mouse fallback
+    if (k.ArrowLeft) yaw.current += delta * 1.8
+    if (k.ArrowRight) yaw.current -= delta * 1.8
+    if (k.ArrowUp) pitch.current = clamp(pitch.current + delta * 1.2, -1.1, 0.5)
+    if (k.ArrowDown) pitch.current = clamp(pitch.current - delta * 1.2, -1.1, 0.5)
+
+    // orient camera, then read its flattened forward/right for movement
+    camera.rotation.set(pitch.current, yaw.current, 0, 'YXZ')
+    camera.getWorldDirection(fwd)
+    fwd.y = 0
+    fwd.normalize()
+    right.crossVectors(fwd, up).normalize()
+
+    const speed = (k.ShiftLeft || k.ShiftRight ? 5.2 : 3.2) * delta
+    let mx = 0
+    let mz = 0
+    if (k.KeyW) { mx += fwd.x; mz += fwd.z }
+    if (k.KeyS) { mx -= fwd.x; mz -= fwd.z }
+    if (k.KeyD) { mx += right.x; mz += right.z }
+    if (k.KeyA) { mx -= right.x; mz -= right.z }
+    const len = Math.hypot(mx, mz)
+    if (len > 0) {
+      mx = (mx / len) * speed
+      mz = (mz / len) * speed
+      const [nx, nz] = resolveMove(pos.current.x, pos.current.z, pos.current.x + mx, pos.current.z + mz)
+      pos.current.x = nx
+      pos.current.z = nz
+    }
+    camera.position.set(pos.current.x, EYE_HEIGHT, pos.current.z)
+
+    // ---- distance to the hidden phone; win check ----
+    d.copy(phoneWorldPos.current).sub(pos.current)
+    d.y = 0
+    const dist = d.length()
+    const feet = Math.max(1, Math.round(dist * UNITS_TO_FEET))
+    const near = dist < FOUND_DISTANCE
+    if (!foundRef.current && dist < FOUND_DISTANCE) {
+      foundRef.current = true
+      onFound()
+    }
+
+    // ---- the held device floats in the lower-right of the view ----
+    const h = held.current
+    if (h) {
+      h.position.copy(camera.position)
+      h.quaternion.copy(camera.quaternion)
+      h.translateX(0.5)
+      h.translateY(-0.42)
+      h.translateZ(-1.25)
+    }
+
+    // ---- the real Finder tracks the phone: ease the lit LED toward its
+    //      bearing computed in the device's own (tilted) local frame ----
+    qDev.copy(camera.quaternion).multiply(tiltQuat)
+    qInv.copy(qDev).invert()
+    localDir.copy(d).normalize().applyQuaternion(qInv)
+    const targetAngle = Math.atan2(-localDir.z, localDir.x)
+    heldSweep.current += shortestAngle(targetAngle, heldSweep.current) * Math.min(1, delta * 6)
+
+    const ledColor = foundRef.current ? FOUND_COLOR : SEEK_COLOR
+    const width = 0.32
+    const pulse = 0.7 + 0.3 * Math.sin(t * 7)
+    heldLedRefs.current.forEach((m, i) => {
+      if (!m) return
+      const da = shortestAngle(LED_LAYOUT[i].angle, heldSweep.current)
+      const g = foundRef.current ? 1 : Math.exp(-(da * da) / (2 * width * width))
+      m.material.emissive.copy(ledColor)
+      m.material.emissiveIntensity = 0.08 + g * 3.2 * pulse
+      m.material.color.copy(ledColor).multiplyScalar(0.25 + g * 0.75)
+    })
+
+    // ---- draw the device's round screen (direction arrow + distance) ----
+    drawPuckScreen(screen.ctx, { sweep: heldSweep.current, feet, near, seeking: true, t })
+    screen.tex.needsUpdate = true
+  })
+
+  return (
+    <group ref={held} scale={0.17}>
+      {/* an exact replica of the Finder puck, reclined so its screen faces you */}
+      <group rotation={[HELD_TILT, 0, 0]}>
+        <PuckVisual screenTex={screen.tex} ledRefs={heldLedRefs} />
+      </group>
+    </group>
+  )
+}
+
 /* ---------------- Scene ---------------- */
 
 // reposition the camera when switching modes (OrbitControls takes over after)
 function CameraRig({ mode }) {
   const { camera } = useThree()
   useEffect(() => {
+    if (mode === 'play') return // Player drives the camera in first-person
     if (mode === 'inside') camera.position.set(0.5, 3.6, 9.5)
-    else camera.position.set(0.6, 8.6, 12.6) // look down into the room corner
+    else camera.position.set(1.0, 12.5, 17.5) // look down into the bigger room
   }, [mode, camera])
   return null
 }
 
-function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, closing, onExplodedClosed }) {
+function Scene({
+  mode,
+  laptopTarget,
+  stickerWorldPos,
+  hintRef,
+  spotNameRef,
+  closing,
+  onExplodedClosed,
+  hiddenTarget,
+  won,
+  onFound,
+  resetKey,
+}) {
   const inside = mode === 'inside'
+  const play = mode === 'play'
   return (
     <>
       <color attach="background" args={[inside ? '#f2f3f5' : '#e9dfce']} />
@@ -1115,15 +1870,15 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, clos
       {/* warm key light (window / lamp side), cool fill, gentle back */}
       <ambientLight intensity={inside ? 0.65 : 0.5} />
       <directionalLight
-        position={[6, 10, 6]}
+        position={[8, 13, 8]}
         intensity={1.45}
         color={inside ? '#ffffff' : '#fff2e0'}
         castShadow
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-12}
-        shadow-camera-right={12}
-        shadow-camera-top={12}
-        shadow-camera-bottom={-12}
+        shadow-camera-left={-16}
+        shadow-camera-right={16}
+        shadow-camera-top={16}
+        shadow-camera-bottom={-16}
       />
       <directionalLight position={[-6, 5, 2]} intensity={0.4} color="#dce6ff" />
       <directionalLight position={[-3, 6, -8]} intensity={0.35} color="#fff2e0" />
@@ -1134,6 +1889,20 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, clos
           <ExplodedSticker closing={closing} onClosed={onExplodedClosed} />
           <ContactShadows position={[0, -0.001, 0]} opacity={0.38} scale={30} blur={2.6} far={5} resolution={1024} color="#1a1a1a" />
         </>
+      ) : play ? (
+        <>
+          <Room />
+          <GameRoomExtras />
+          <PhoneWithSticker
+            mode="play"
+            targetRef={hiddenTarget}
+            worldPosRef={stickerWorldPos}
+            revealed={won}
+            found={won}
+            scale={hiddenTarget.current[3] ?? 0.6}
+          />
+          <Player phoneWorldPos={stickerWorldPos} onFound={onFound} resetKey={resetKey} />
+        </>
       ) : (
         <>
           <Room />
@@ -1143,13 +1912,15 @@ function Scene({ mode, laptopTarget, stickerWorldPos, hintRef, spotNameRef, clos
         </>
       )}
 
-      <OrbitControls
-        enablePan={false}
-        minDistance={6}
-        maxDistance={22}
-        maxPolarAngle={Math.PI / 2.1}
-        target={inside ? [0, 2.3, 0] : [-0.2, 1.1, -2]}
-      />
+      {!play && (
+        <OrbitControls
+          enablePan={false}
+          minDistance={6}
+          maxDistance={30}
+          maxPolarAngle={Math.PI / 2.1}
+          target={inside ? [0, 2.3, 0] : [0, 1.1, -1.5]}
+        />
+      )}
     </>
   )
 }
@@ -1172,10 +1943,14 @@ const buttonStyle = (primary) => ({
 })
 
 export default function FinderDemo() {
-  const [mode, setMode] = useState('idle') // 'idle' | 'seek' | 'inside'
+  const [mode, setMode] = useState('idle') // 'idle' | 'seek' | 'inside' | 'play'
   const [closing, setClosing] = useState(false) // exploded view is sealing before going home
+  const [won, setWon] = useState(false) // player found the hidden phone
+  const [hiddenName, setHiddenName] = useState('') // where it was hiding (for the win card)
+  const [resetKey, setResetKey] = useState(0) // bump to re-drop the player + re-hide
   const laptopTarget = useRef([...LAPTOP_HOME])
   const stickerWorldPos = useRef(new THREE.Vector3(...LAPTOP_HOME))
+  const hiddenTarget = useRef([...HIDING_SPOTS[0].pos, HIDING_SPOTS[0].scale])
   const hintRef = useRef()
   const spotNameRef = useRef(SPOTS[0].name)
   const spotIndex = useRef(0)
@@ -1207,6 +1982,21 @@ export default function FinderDemo() {
     setMode('inside')
   }
 
+  // Start / restart the find-the-phone game: hide it somewhere new.
+  const startGame = () => {
+    const spot = pickHidingSpot()
+    hiddenTarget.current = [...spot.pos, spot.scale]
+    stickerWorldPos.current.set(spot.pos[0], spot.pos[1], spot.pos[2])
+    setHiddenName(spot.name)
+    setWon(false)
+    setResetKey((k) => k + 1)
+    setMode('play')
+  }
+  const exitGame = () => {
+    setWon(false)
+    goIdle()
+  }
+
   // Back from the exploded view: seal the sticker first, then return home
   const beginClose = () => setClosing(true)
   const finishClose = () => {
@@ -1219,11 +2009,13 @@ export default function FinderDemo() {
       ? 'Inside the sticker — magnified view, ~3 mm thin in real life'
       : mode === 'seek'
       ? 'Left it somewhere? The Finder points across the room.'
+      : mode === 'play'
+      ? 'Walk the room and follow the tracker to your hidden phone.'
       : 'Stick it on your phone. The Finder always knows where it is.'
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '100vh' }}>
-      <Canvas shadows dpr={[1, 2]} camera={{ position: [0.6, 8.6, 12.6], fov: 44 }}>
+      <Canvas shadows dpr={[1, 2]} camera={{ position: [1.0, 12.5, 17.5], fov: 44 }}>
         <Scene
           mode={mode}
           laptopTarget={laptopTarget}
@@ -1232,6 +2024,10 @@ export default function FinderDemo() {
           spotNameRef={spotNameRef}
           closing={closing}
           onExplodedClosed={finishClose}
+          hiddenTarget={hiddenTarget}
+          won={won}
+          onFound={() => setWon(true)}
+          resetKey={resetKey}
         />
       </Canvas>
 
@@ -1253,7 +2049,10 @@ export default function FinderDemo() {
       <div style={{ position: 'absolute', bottom: 32, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 12 }}>
         {mode === 'idle' && (
           <>
-            <button onClick={() => setMode('seek')} style={buttonStyle(true)}>
+            <button onClick={startGame} style={buttonStyle(true)}>
+              Play: find the phone
+            </button>
+            <button onClick={() => setMode('seek')} style={buttonStyle(false)}>
               Show how it works
             </button>
             <button onClick={enterInside} style={buttonStyle(false)}>
@@ -1264,6 +2063,11 @@ export default function FinderDemo() {
         {mode === 'seek' && (
           <button onClick={goIdle} style={buttonStyle(false)}>
             Reset
+          </button>
+        )}
+        {mode === 'play' && !won && (
+          <button onClick={exitGame} style={buttonStyle(false)}>
+            Exit
           </button>
         )}
         {mode === 'inside' && (
@@ -1293,6 +2097,72 @@ export default function FinderDemo() {
       >
         Item this way
       </div>
+
+      {/* ---- Playable-hunt HUD: held-tracker readout + controls + win card ---- */}
+      {mode === 'play' && (
+        <>
+          {/* controls hint, top-left */}
+          <div
+            style={{
+              position: 'absolute',
+              top: 20,
+              left: 20,
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: '#6e6e73',
+              background: 'rgba(255,255,255,0.72)',
+              backdropFilter: 'blur(6px)',
+              padding: '10px 14px',
+              borderRadius: 12,
+              boxShadow: '0 2px 10px rgba(0,0,0,0.08)',
+              pointerEvents: 'none',
+            }}
+          >
+            <b style={{ color: '#1d1d1f' }}>Move</b> W A S D · <b style={{ color: '#1d1d1f' }}>Look</b> drag / arrows · <b style={{ color: '#1d1d1f' }}>Run</b> Shift
+            <div style={{ marginTop: 4, color: '#86868b' }}>Read the Finder in your hand — its ring points the way.</div>
+          </div>
+
+          {/* win card */}
+          {won && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(20,20,22,0.32)',
+                backdropFilter: 'blur(2px)',
+              }}
+            >
+              <div
+                style={{
+                  background: 'rgba(255,255,255,0.96)',
+                  borderRadius: 20,
+                  padding: '28px 34px',
+                  textAlign: 'center',
+                  boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+                  maxWidth: 340,
+                }}
+              >
+                <div style={{ fontSize: 40 }}>🎉</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: '#1d1d1f', marginTop: 6 }}>Found it!</div>
+                <div style={{ fontSize: 14, color: '#6e6e73', marginTop: 6 }}>
+                  Your phone was hiding <b>{hiddenName}</b>.
+                </div>
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 20 }}>
+                  <button onClick={startGame} style={buttonStyle(true)}>
+                    Hide it again
+                  </button>
+                  <button onClick={exitGame} style={buttonStyle(false)}>
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }
