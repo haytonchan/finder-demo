@@ -777,7 +777,7 @@ function ExplodedSticker({ closing, onClosed }) {
           <boxGeometry args={[0.32, 0.014, 0.22]} />
           <meshStandardMaterial color="#e8dfc4" roughness={0.95} />
         </mesh>
-        {layerLabel('adhesive', 'Adhesive backing', 2.6)}
+        {layerLabel('adhesive', 'Adhesive backing', 2.6, 'Holds the tag onto your device')}
       </group>
 
       {/* 2 — PCB: printed traces, pads, silkscreen + a few passives */}
@@ -803,7 +803,7 @@ function ExplodedSticker({ closing, onClosed }) {
             <meshStandardMaterial color={v.c} roughness={0.5} metalness={0.2} />
           </mesh>
         ))}
-        {layerLabel('pcb', 'PCB', -2.4)}
+        {layerLabel('pcb', 'PCB', -2.4, 'Wires all the parts together')}
       </group>
 
       {/* 3 — UWB + BLE chips: laser markings + gold pins */}
@@ -850,7 +850,7 @@ function ExplodedSticker({ closing, onClosed }) {
             }}
           >
             UWB chip
-            <div style={{ fontWeight: 400, fontSize: 10, color: '#86868b' }}>direction-finding</div>
+            <div style={{ fontWeight: 400, fontSize: 10, color: '#86868b' }}>Pinpoints exact direction & distance</div>
           </div>
         </Html>
         <Html position={[2.3, 0.08, 0]} center zIndexRange={[10, 0]} style={{ pointerEvents: 'none' }}>
@@ -863,7 +863,7 @@ function ExplodedSticker({ closing, onClosed }) {
             }}
           >
             BLE chip
-            <div style={{ fontWeight: 400, fontSize: 10, color: '#86868b' }}>network connection</div>
+            <div style={{ fontWeight: 400, fontSize: 10, color: '#86868b' }}>Connects to phones & the finder network</div>
           </div>
         </Html>
       </group>
@@ -888,7 +888,7 @@ function ExplodedSticker({ closing, onClosed }) {
             <meshStandardMaterial color="#d8b25f" roughness={0.3} metalness={0.85} />
           </mesh>
         ))}
-        {layerLabel('antenna', 'Antenna trace', -2.55)}
+        {layerLabel('antenna', 'Antenna trace', -2.55, 'Sends & receives the locator signal')}
       </group>
 
       {/* 5 — coin-cell battery (thickest layer), engraved top + negative bottom */}
@@ -909,7 +909,7 @@ function ExplodedSticker({ closing, onClosed }) {
           <cylinderGeometry args={[0.86, 0.86, 0.012, 64]} />
           <meshStandardMaterial color="#7d838c" roughness={0.45} metalness={0.5} />
         </mesh>
-        {layerLabel('battery', 'Coin-cell battery', 2.55)}
+        {layerLabel('battery', 'Coin-cell battery', 2.55, 'Powers the tag for ~1 year')}
       </group>
 
       {/* 6 — outer plastic shell: a lid that wraps down over the stack and
@@ -930,7 +930,7 @@ function ExplodedSticker({ closing, onClosed }) {
           <circleGeometry args={[R - 0.16, 64]} />
           <meshStandardMaterial map={pennTex} roughness={0.75} transparent />
         </mesh>
-        {layerLabel('shell', 'Sealed outer shell', 2.7)}
+        {layerLabel('shell', 'Sealed outer shell', 2.7, 'Seals out water & dust')}
       </group>
     </group>
   )
